@@ -368,7 +368,10 @@ fn reth_input(
             .get(key)
             .and_then(|x| x.as_str())
             .with_context(|| format!("payload field {key} missing"))?;
-        hex::decode(s.trim_start_matches("0x")).with_context(|| format!("payload field {key} not hex"))
+        let stripped = s.trim_start_matches("0x");
+        // Numeric fields ({:#x}) may have an odd digit count; left-pad.
+        let padded = if stripped.len() % 2 == 1 { format!("0{stripped}") } else { stripped.to_string() };
+        hex::decode(padded).with_context(|| format!("payload field {key} not hex"))
     };
     let fixed = |key: &str, out: &mut [u8]| -> anyhow::Result<()> {
         let b = hex_bytes(key)?;
