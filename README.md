@@ -11,7 +11,7 @@ core is built into three zkVM guest ELFs, **SP1**, **ZisK**, and
 |---|---|---|
 | SP1 | `rv64im` / lp64 | `6.3.1` |
 | ZisK | `rv64ima` / lp64 | `1.0.0-alpha` |
-| OpenVM | `rv32im` / ilp32 | `2.0.0-rc.3` |
+| OpenVM | `rv64im` / lp64 | `develop-v2.1.0` |
 
 ## Prerequisites
 
