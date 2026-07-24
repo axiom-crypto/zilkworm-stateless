@@ -17,6 +17,9 @@ FetchContent_Declare(
     GIT_TAG        c3ebf73a8b9ba1957ee473d19c51cb6041c88f53 # feat/canonical-witness
     # No GIT_SHALLOW: the pin is a commit on feat/canonical-witness, not on the
     # default branch (master), so a shallow clone can't reach it — full clone.
+    # OpenVM ECC/modular acceleration hooks (patches/*.patch) are applied on
+    # top of the pin; the script is idempotent across reconfigures.
+    PATCH_COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/patches/apply-patches.sh <SOURCE_DIR>
 )
 
 FetchContent_GetProperties(zilkworm)

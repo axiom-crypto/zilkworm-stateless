@@ -1,0 +1,441 @@
+diff --git a/include/evmmax/evmmax.hpp b/include/evmmax/evmmax.hpp
+index ffc4435..e9d7f34 100644
+--- a/include/evmmax/evmmax.hpp
++++ b/include/evmmax/evmmax.hpp
+@@ -14,6 +14,10 @@
+ #include <zisk_syscalls.hpp>
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_ecc.hpp>
++#endif
++
+ namespace evmmax
+ {
+ /// Compute the modular inverse of the number modulo 2³²: inv⋅a = 1 mod 2³².
+@@ -90,7 +94,7 @@ class ModArith
+ public:
+     constexpr explicit ModArith(const UintT& mod) noexcept
+       : mod_{mod},
+-#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
++#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
+         r_squared_{BN ? 1 : compute_r_squared(mod)},
+         mod_inv_{BN ? 0 : compute_mont_mod_inv(mod)}
+ #else
+@@ -108,7 +112,7 @@ public:
+     /// what gives aR²R⁻¹ % mod = aR % mod.
+     constexpr UintT to_mont(const UintT& x) const noexcept
+     {
+-#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
++#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
+         if constexpr (BN)
+             return x;
+         else
+@@ -122,7 +126,7 @@ public:
+     /// Montgomery multiplication mul(x, 1) what gives aRR⁻¹ % mod = a % mod.
+     constexpr UintT from_mont(const UintT& x) const noexcept
+     {
+-#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
++#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
+         if constexpr (BN)
+             return x;
+         else
+@@ -171,6 +175,18 @@ public:
+         }
+ #endif
+ 
++#if defined(OPENVM)
++        // OpenVM bn254 base-field MulMod (custom-1 modular-arithmetic
++        // instruction) on canonical (non-Montgomery) values; the host
++        // normalizes the result to canonical form.
++        if constexpr (BN)
++        {
++            UintT res;
++            openvm::bn254_fp_mulmod(&res, &x, &y);
++            return res;
++        }
++#endif
++
+ #if defined(RISC0)
+         // RISC0 256-bit modular-multiply accelerator (ecall ecall::BIGINT = 4):
+         //   sys_bigint(result, OP_MULTIPLY=0, x, y, modulus) => (x*y) mod modulus
+@@ -242,6 +258,15 @@ public:
+         }
+ #endif
+ 
++#if defined(OPENVM)
++        if constexpr (BN)
++        {
++            UintT res;
++            openvm::bn254_fp_addmod(&res, &x, &y);
++            return res;
++        }
++#endif
++
+         const auto s = addc(x, y);  // TODO: cannot overflow if modulus is sparse (e.g. 255 bits).
+         const auto d = subc(s.value, mod_);
+         return (!s.carry && d.carry) ? s.value : d.value;
+@@ -261,6 +286,15 @@ public:
+         }
+ #endif
+ 
++#if defined(OPENVM)
++        if constexpr (BN)
++        {
++            UintT res;
++            openvm::bn254_fp_submod(&res, &x, &y);
++            return res;
++        }
++#endif
++
+         const auto d = subc(x, y);
+         const auto s = d.value + mod_;
+         return (d.carry) ? s : d.value;
+@@ -270,6 +304,21 @@ public:
+     /// Returns 0 for non-invertible x (including x == 0).
+     constexpr UintT inv(const UintT& x) const noexcept
+     {
++#if defined(OPENVM)
++        // OpenVM bn254 base-field DivMod computes 1/x directly (the prime
++        // modulus makes every non-zero x invertible). Keep the "0 -> 0"
++        // convention of this function.
++        if constexpr (BN)
++        {
++            if (x == 0) [[unlikely]]
++                return 0;
++            const UintT one_ = 1;
++            UintT res;
++            openvm::bn254_fp_divmod(&res, &one_, &x);
++            return res;
++        }
++#endif
++
+         assert((mod_ & 1) == 1);
+         assert(mod_ >= 3);
+ 
+diff --git a/lib/evmone_precompiles/bn254.hpp b/lib/evmone_precompiles/bn254.hpp
+index e1837a1..bd2e0ee 100644
+--- a/lib/evmone_precompiles/bn254.hpp
++++ b/lib/evmone_precompiles/bn254.hpp
+@@ -27,7 +27,7 @@ struct Curve
+         /// The field prime number (P).
+         static constexpr auto ORDER =
+             0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47_u256;
+-#if defined(SP1) || defined(SP1TURBO) || defined(ZISK) || defined(RISC0)
++#if defined(SP1) || defined(SP1TURBO) || defined(ZISK) || defined(RISC0) || defined(OPENVM)
+         static constexpr bool BN_ACCELERATED = true;
+ #endif
+     };
+diff --git a/lib/evmone_precompiles/pairing/field_template.hpp b/lib/evmone_precompiles/pairing/field_template.hpp
+index 76607fc..3efa95f 100644
+--- a/lib/evmone_precompiles/pairing/field_template.hpp
++++ b/lib/evmone_precompiles/pairing/field_template.hpp
+@@ -13,6 +13,10 @@
+ #include <zisk_syscalls.hpp>
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_ecc.hpp>
++#endif
++
+ 
+ namespace evmmax::bn254
+ {
+@@ -110,6 +114,17 @@ struct ExtFieldElem
+             return res;
+         }
+ #endif
++#if defined(OPENVM)
++        // OpenVM bn254 Fp2 Add (custom-1 complex-extension instruction) on the
++        // canonical (c0 || c1) coefficient layout evmone already uses.
++        if constexpr (std::is_same_v<ConfigT, bn254::Fq2Config>)
++        {
++            ExtFieldElem res;
++            openvm::bn254_fp2_addmod(
++                res.coeffs.data(), e1.coeffs.data(), e2.coeffs.data());
++            return res;
++        }
++#endif
+ 
+         auto res = e1.coeffs;
+         for (size_t i = 0; i < DEGREE; ++i)
+@@ -137,6 +152,15 @@ struct ExtFieldElem
+             return res;
+         }
+ #endif
++#if defined(OPENVM)
++        if constexpr (std::is_same_v<ConfigT, bn254::Fq2Config>)
++        {
++            ExtFieldElem res;
++            openvm::bn254_fp2_submod(
++                res.coeffs.data(), e1.coeffs.data(), e2.coeffs.data());
++            return res;
++        }
++#endif
+ 
+         auto res = e1.coeffs;
+         for (size_t i = 0; i < DEGREE; ++i)
+@@ -164,6 +188,16 @@ struct ExtFieldElem
+             return res;
+         }
+ #endif
++#if defined(OPENVM)
++        if constexpr (std::is_same_v<ConfigT, bn254::Fq2Config>)
++        {
++            const ExtFieldElem zero = {};
++            ExtFieldElem res;
++            openvm::bn254_fp2_submod(
++                res.coeffs.data(), zero.coeffs.data(), e.coeffs.data());
++            return res;
++        }
++#endif
+ 
+         CoeffArrT ret;
+         for (size_t i = 0; i < DEGREE; ++i)
+@@ -191,6 +225,15 @@ struct ExtFieldElem
+             return res;
+         }
+ #endif
++#if defined(OPENVM)
++        if constexpr (std::is_same_v<ConfigT, bn254::Fq2Config>)
++        {
++            ExtFieldElem res;
++            openvm::bn254_fp2_mulmod(
++                res.coeffs.data(), e1.coeffs.data(), e2.coeffs.data());
++            return res;
++        }
++#endif
+ 
+         return multiply(e1, e2);
+     }
+diff --git a/lib/evmone_precompiles/secp256k1.cpp b/lib/evmone_precompiles/secp256k1.cpp
+index 631013d..2cf7ae3 100644
+--- a/lib/evmone_precompiles/secp256k1.cpp
++++ b/lib/evmone_precompiles/secp256k1.cpp
+@@ -13,6 +13,12 @@
+ #include <algorithm>
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_ecc.hpp>
++#include <algorithm>
++#include <cstring>
++#endif
++
+ namespace evmmax::secp256k1
+ {
+ namespace
+@@ -548,6 +554,152 @@ void zisk_msm(zisk_AffinePoint r, const uint256& u, const zisk_AffinePoint p,
+ #endif
+ 
+ 
++#ifdef OPENVM
++namespace
++{
++// OpenVM secp256k1 affine point: x[4] || y[4], little-endian 64-bit limbs of
++// canonical (non-Montgomery) field elements. This is byte-identical to a
++// pair of LE intx::uint256 values and to the (x || y) operand layout of
++// OpenVM's short-Weierstrass custom instructions.
++using openvm_AffinePoint = uint64_t[8];
++constexpr size_t OPENVM_POINT_LIMBS = 8;
++
++constexpr auto openvm_Gx = 0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798_u256;
++constexpr auto openvm_Gy = 0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8_u256;
++
++// Generator G in canonical LE limbs.
++constexpr openvm_AffinePoint openvm_G = {
++    openvm_Gx[0], openvm_Gx[1], openvm_Gx[2], openvm_Gx[3],
++    openvm_Gy[0], openvm_Gy[1], openvm_Gy[2], openvm_Gy[3],
++};
++
++[[gnu::always_inline]] inline bool openvm_is_zero(const openvm_AffinePoint p) noexcept
++{
++    uint64_t fold = 0;
++    for (size_t i = 0; i < OPENVM_POINT_LIMBS; ++i)
++        fold |= p[i];
++    return fold == 0;
++}
++
++inline void openvm_point_to_bytes(uint8_t bytes[64], const openvm_AffinePoint r) noexcept
++{
++    for (size_t i = 0; i < 4; ++i)
++        intx::be::unsafe::store<uint64_t>(&bytes[24 - i * 8], r[i]);
++    for (size_t i = 0; i < 4; ++i)
++        intx::be::unsafe::store<uint64_t>(&bytes[56 - i * 8], r[i + 4]);
++}
++
++// OpenVM secp256k1 EC_ADD_NE: requires distinct x coordinates; result may
++// alias the first operand (the Rust guest lib's add_ne_assign does the same).
++[[gnu::always_inline]] inline void openvm_secp256k1_add_raw(
++    openvm_AffinePoint r, const openvm_AffinePoint p) noexcept
++{
++    openvm::secp256k1_ec_add_ne(r, r, p);
++}
++
++[[gnu::always_inline]] inline void openvm_secp256k1_double_raw(openvm_AffinePoint r) noexcept
++{
++    openvm::secp256k1_ec_double(r, r);
++}
++
++// Add non-zero p to non-zero r, handling the same-x edge cases the raw
++// instruction does not (mirrors sp1_secp256k1_add_nz / zisk_secp256k1_add_nz).
++[[gnu::always_inline]] inline bool openvm_secp256k1_add_nz(
++    openvm_AffinePoint r, const openvm_AffinePoint p) noexcept
++{
++    // Quick reject on first limb of x (~1/2^64 false positive).
++    if (r[0] != p[0]) [[likely]]
++    {
++        openvm_secp256k1_add_raw(r, p);
++        return true;
++    }
++    if (reinterpret_cast<const uint256&>(r[0]) != reinterpret_cast<const uint256&>(p[0]))
++        [[likely]]
++    {
++        openvm_secp256k1_add_raw(r, p);
++        return true;
++    }
++
++    const auto& ry = reinterpret_cast<const uint256&>(r[OPENVM_POINT_LIMBS / 2]);
++    const auto& py = reinterpret_cast<const uint256&>(p[OPENVM_POINT_LIMBS / 2]);
++    if (ry == py)
++    {
++        openvm_secp256k1_double_raw(r);
++        return true;
++    }
++    // r == -p  ->  r becomes the point at infinity (all-zero sentinel).
++    std::fill_n(r, OPENVM_POINT_LIMBS, uint64_t{0});
++    return false;
++}
++
++// Add p to r, additionally handling zero (infinity) points.
++void openvm_secp256k1_add(openvm_AffinePoint r, const openvm_AffinePoint p) noexcept
++{
++    if (openvm_is_zero(p)) [[unlikely]]
++        return;
++    if (openvm_is_zero(r)) [[unlikely]]
++    {
++        std::copy_n(p, OPENVM_POINT_LIMBS, r);
++        return;
++    }
++    openvm_secp256k1_add_nz(r, p);
++}
++
++// OpenVM version of ecc::msm(): computes u×P + v×Q via Shamir's trick using
++// the OpenVM short-Weierstrass instructions. Mirrors zisk_msm exactly.
++void openvm_msm(openvm_AffinePoint r, const uint256& u, const openvm_AffinePoint p,
++    const uint256& v, const openvm_AffinePoint q) noexcept
++{
++    openvm_AffinePoint h;
++    std::copy_n(p, OPENVM_POINT_LIMBS, h);
++    openvm_secp256k1_add(h, q);
++
++    const uint64_t* points[4] = {nullptr, p, q, h};
++
++    const auto bw = std::max(intx::bit_width(u), intx::bit_width(v));
++    if (bw == 0)
++    {
++        std::fill_n(r, OPENVM_POINT_LIMBS, uint64_t{0});
++        return;
++    }
++
++    size_t i = bw;
++    for (; i != 0; --i)
++    {
++        const auto idx =
++            2 * unsigned{intx::bit_test(v, i - 1)} + unsigned{intx::bit_test(u, i - 1)};
++        if (idx != 0)
++        {
++            std::copy_n(points[idx], OPENVM_POINT_LIMBS, r);
++            --i;
++            break;
++        }
++    }
++
++    bool nz = true;
++    for (; i != 0 && nz; --i)
++    {
++        openvm_secp256k1_double_raw(r);
++        const auto idx =
++            2 * unsigned{intx::bit_test(v, i - 1)} + unsigned{intx::bit_test(u, i - 1)};
++        if (idx != 0)
++            nz = openvm_secp256k1_add_nz(r, points[idx]);
++    }
++    for (; i != 0; --i)
++    {
++        if (!openvm_is_zero(r))
++            openvm_secp256k1_double_raw(r);
++        const auto idx =
++            2 * unsigned{intx::bit_test(v, i - 1)} + unsigned{intx::bit_test(u, i - 1)};
++        if (idx != 0)
++            openvm_secp256k1_add(r, points[idx]);
++    }
++}
++
++}  // namespace
++#endif
++
++
+ std::optional<AffinePoint> secp256k1_ecdsa_recover(std::span<const uint8_t, 32> hash,
+     std::span<const uint8_t, 32> r_bytes, std::span<const uint8_t, 32> s_bytes,
+     bool parity) noexcept
+@@ -693,6 +845,60 @@ std::optional<evmc::address> ecrecover(std::span<const uint8_t, 32> hash,
+     uint8_t serialized[64];
+     zisk_point_to_bytes(serialized, zisk_Q);
+     return to_address(serialized);
++#elif defined(OPENVM)
++    // Validate r and s canonically: both must be in [1, n-1].
++    const auto& n = Curve::ORDER;
++    const auto r_val = intx::be::unsafe::load<uint256>(r_bytes.data());
++    if (r_val == 0 || r_val >= n) [[unlikely]]
++        return std::nullopt;
++    const auto s_val = intx::be::unsafe::load<uint256>(s_bytes.data());
++    if (s_val == 0 || s_val >= n) [[unlikely]]
++        return std::nullopt;
++
++    // Scalar-field arithmetic on canonical values via the OpenVM modular
++    // instructions. AddMod with 0 normalizes the possibly-unreduced hash
++    // (the ops accept unreduced inputs and produce canonical outputs);
++    // DivMod provides the inverse directly.
++    const uint256 zero_{};
++    const uint256 one_ = 1;
++    const auto e = intx::be::unsafe::load<uint256>(hash.data());
++    uint256 z;
++    openvm::secp256k1_fr_addmod(&z, &e, &zero_);   // z = e mod n
++    uint256 r_inv;
++    openvm::secp256k1_fr_divmod(&r_inv, &one_, &r_val);
++    uint256 zr;
++    openvm::secp256k1_fr_mulmod(&zr, &z, &r_inv);
++    uint256 u1;
++    openvm::secp256k1_fr_submod(&u1, &zero_, &zr);  // u1 = -z/r mod n
++    uint256 u2;
++    openvm::secp256k1_fr_mulmod(&u2, &s_val, &r_inv);  // u2 = s/r mod n
++    assert(u2 != 0);
++
++    // Decompress R using the (software, well-tested) field square root, then
++    // hand the canonical affine point to the OpenVM point instructions.
++    // field_sqrt runs once per recovery; the dominant cost is the msm below,
++    // whose EC group operations are single custom instructions.
++    const auto r_mont = Curve::Fp{r_val};
++    const auto y = calculate_y(r_mont, parity);
++    if (!y.has_value())
++        return std::nullopt;
++    const auto y_val = y->value();
++
++    // R in canonical LE limbs (uint256 is stored as LE limbs in memory).
++    openvm_AffinePoint ovm_R;
++    std::memcpy(&ovm_R[0], &r_val, 32);
++    std::memcpy(&ovm_R[4], &y_val, 32);
++
++    // Shamir's trick: Q = u1*G + u2*R.
++    openvm_AffinePoint ovm_Q;
++    openvm_msm(ovm_Q, u1, openvm_G, u2, ovm_R);
++
++    if (openvm_is_zero(ovm_Q)) [[unlikely]]
++        return std::nullopt;
++
++    uint8_t serialized[64];
++    openvm_point_to_bytes(serialized, ovm_Q);
++    return to_address(serialized);
+ #else
+     const auto pubkey = secp256k1_ecdsa_recover(hash, r_bytes, s_bytes, parity);
+     if (!pubkey.has_value())
