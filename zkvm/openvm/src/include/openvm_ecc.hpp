@@ -119,7 +119,10 @@ inline constexpr int CURVE_BN254 = 1;
                      : "+r"(tmp_) : "r"(MODULUS) : "memory");                  \
     } while (0)
 
-// Fp2 setup: ADDSUB (rs2=x0) then MULDIV (rs2=x1). SCRATCH is 2*N bytes.
+// Fp2 setup: ADDSUB (rs2=x0) then MULDIV (rs2=x1). SCRATCH is 2*N bytes and
+// MODULUS2 points to the modulus bytes CONCATENATED TWICE (modulus||modulus,
+// 2*N bytes) — one copy per coefficient, mirroring complex-macros'
+// two_modulus_bytes.
 #define OPENVM_FP2_SETUP(FP2_IDX, SCRATCH, MODULUS)                            \
     do {                                                                       \
         asm volatile(".insn r 0x2b, 2, ((" #FP2_IDX ")*8 + 4), %0, %1, x0"     \
@@ -162,6 +165,15 @@ alignas(8) inline constexpr uint8_t BN254_FP_LE[32] = {
 alignas(8) inline constexpr uint8_t BN254_FR_LE[32] = {
     0x01, 0x00, 0x00, 0xf0, 0x93, 0xf5, 0xe1, 0x43, 0x91, 0x70, 0xb9, 0x79,
     0x48, 0xe8, 0x33, 0x28, 0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8,
+    0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30};
+
+// bn254 modulus twice (one copy per Fp2 coefficient) for the Fp2 setup.
+alignas(8) inline constexpr uint8_t BN254_FP2_MODULUS2[64] = {
+    0x47, 0xfd, 0x7c, 0xd8, 0x16, 0x8c, 0x20, 0x3c, 0x8d, 0xca, 0x71, 0x68,
+    0x91, 0x6a, 0x81, 0x97, 0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8,
+    0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30,
+    0x47, 0xfd, 0x7c, 0xd8, 0x16, 0x8c, 0x20, 0x3c, 0x8d, 0xca, 0x71, 0x68,
+    0x91, 0x6a, 0x81, 0x97, 0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8,
     0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30};
 
 // (modulus || a) pairs for curve setups; a = 0 for both secp256k1 and bn254.
@@ -224,7 +236,7 @@ alignas(8) inline constexpr uint8_t SW_SETUP_P2[64] = {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[64];
-    OPENVM_FP2_SETUP(0, scratch, ecc_detail::BN254_FP_LE);
+    OPENVM_FP2_SETUP(0, scratch, ecc_detail::BN254_FP2_MODULUS2);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_secp256k1_curve() noexcept {
