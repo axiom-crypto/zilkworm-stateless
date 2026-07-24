@@ -439,3 +439,159 @@ index 631013d..2cf7ae3 100644
  #else
      const auto pubkey = secp256k1_ecdsa_recover(hash, r_bytes, s_bytes, parity);
      if (!pubkey.has_value())
+diff --git a/test/state/precompiles.cpp b/test/state/precompiles.cpp
+index 9751527..9c9d4f6 100644
+--- a/test/state/precompiles.cpp
++++ b/test/state/precompiles.cpp
+@@ -27,6 +27,10 @@
+ #include <sp1_syscalls.hpp>
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_ecc.hpp>
++#endif
++
+ #ifdef EVMONE_PRECOMPILES_LIBSECP256K1
+ #include "precompiles_libsecp256k1.hpp"
+ #endif
+@@ -560,6 +564,107 @@ void sp1_bn_mul(sp1_AffinePoint r, const sp1_AffinePoint p, uint256 c) noexcept
+ }  // namespace
+ #endif
+ 
++#if defined(OPENVM)
++namespace
++{
++using intx::uint256;
++
++// OpenVM bn254 G1 affine point: x[4] || y[4] canonical little-endian limbs —
++// the operand layout of OpenVM's short-Weierstrass instructions (curve
++// index 1 in the VM config).
++using openvm_bn_AffinePoint = uint64_t[8];
++constexpr size_t OPENVM_BN_POINT_LIMBS = 8;
++
++[[gnu::always_inline]] inline bool openvm_bn_is_zero(const openvm_bn_AffinePoint p) noexcept
++{
++    uint64_t fold = 0;
++    for (size_t i = 0; i < OPENVM_BN_POINT_LIMBS; ++i)
++        fold |= p[i];
++    return fold == 0;
++}
++
++inline void openvm_bn_point_from_bytes(openvm_bn_AffinePoint r, const uint8_t bytes[64]) noexcept
++{
++    for (size_t i = 0; i < 4; ++i)
++        r[i] = intx::be::unsafe::load<uint64_t>(&bytes[24 - i * 8]);
++    for (size_t i = 0; i < 4; ++i)
++        r[i + 4] = intx::be::unsafe::load<uint64_t>(&bytes[56 - i * 8]);
++}
++
++inline void openvm_bn_point_to_bytes(uint8_t bytes[64], const openvm_bn_AffinePoint r) noexcept
++{
++    for (size_t i = 0; i < 4; ++i)
++        intx::be::unsafe::store<uint64_t>(&bytes[24 - i * 8], r[i]);
++    for (size_t i = 0; i < 4; ++i)
++        intx::be::unsafe::store<uint64_t>(&bytes[56 - i * 8], r[i + 4]);
++}
++
++// r += p with the identity / equal-x branching the raw EC_ADD_NE
++// instruction requires (mirrors sp1_bn_add).
++void openvm_bn_add(openvm_bn_AffinePoint r, const openvm_bn_AffinePoint p) noexcept
++{
++    if (openvm_bn_is_zero(p)) [[unlikely]]
++        return;
++    if (openvm_bn_is_zero(r)) [[unlikely]]
++    {
++        std::copy_n(p, OPENVM_BN_POINT_LIMBS, r);
++        return;
++    }
++
++    const auto& rx = *(const uint256*)&r[0];
++    const auto& ry = *(const uint256*)&r[OPENVM_BN_POINT_LIMBS / 2];
++    const auto& px = *(const uint256*)&p[0];
++    const auto& py = *(const uint256*)&p[OPENVM_BN_POINT_LIMBS / 2];
++
++    if (rx == px) [[unlikely]]
++    {
++        if (ry == py)
++        {
++            openvm::bn254_ec_double(r, r);
++            return;
++        }
++        if (ry == evmmax::bn254::Curve::FIELD_PRIME - py)
++        {
++            std::fill_n(r, OPENVM_BN_POINT_LIMBS, 0);
++            return;
++        }
++    }
++
++    openvm::bn254_ec_add_ne(r, r, p);
++}
++
++// r = [c]p via MSB-first double-and-add (mirrors sp1_bn_mul).
++void openvm_bn_mul(openvm_bn_AffinePoint r, const openvm_bn_AffinePoint p, uint256 c) noexcept
++{
++    while (true)
++    {
++        const auto [reduced_c, less_than] = subc(c, evmmax::bn254::Curve::ORDER);
++        if (less_than) [[likely]]
++            break;
++        c = reduced_c;
++    }
++
++    std::fill_n(r, OPENVM_BN_POINT_LIMBS, 0);
++    const auto bit_width = sizeof(c) * 8 - intx::clz(c);
++
++    if (bit_width == 0) [[unlikely]]
++        return;
++
++    if (openvm_bn_is_zero(p)) [[unlikely]]
++        return;
++
++    std::copy_n(p, OPENVM_BN_POINT_LIMBS, r);  // r = p
++    for (auto i = bit_width - 1; i != 0; --i)
++    {
++        if (!openvm_bn_is_zero(r)) [[likely]]
++            openvm::bn254_ec_double(r, r);
++        if ((c & (uint256{1} << (i - 1))) != 0)
++            openvm_bn_add(r, p);
++    }
++}
++}  // namespace
++#endif
++
+ 
+ ExecutionResult ecadd_execute(const uint8_t* input, size_t input_size, uint8_t* output,
+     [[maybe_unused]] size_t output_size) noexcept
+@@ -591,6 +696,16 @@ ExecutionResult ecadd_execute(const uint8_t* input, size_t input_size, uint8_t*
+         sp1_point_to_bytes(output, sp1_p);
+         return {EVMC_SUCCESS, 64};
+     }
++#elif defined(OPENVM)
++    {
++        openvm_bn_AffinePoint ovm_p;
++        openvm_bn_AffinePoint ovm_q;
++        openvm_bn_point_from_bytes(ovm_p, input_buffer);
++        openvm_bn_point_from_bytes(ovm_q, input_buffer + 64);
++        openvm_bn_add(ovm_p, ovm_q);
++        openvm_bn_point_to_bytes(output, ovm_p);
++        return {EVMC_SUCCESS, 64};
++    }
+ #else
+     const auto res = evmmax::ecc::add_affine(*p, *q);
+     const std::span<uint8_t, 64> output_span{output, 64};
+@@ -627,6 +742,15 @@ ExecutionResult ecmul_execute(const uint8_t* input, size_t input_size, uint8_t*
+         sp1_point_to_bytes(output, sp1_r);
+         return {EVMC_SUCCESS, 64};
+     }
++#elif defined(OPENVM)
++    {
++        openvm_bn_AffinePoint ovm_p;
++        openvm_bn_point_from_bytes(ovm_p, input_buffer);
++        openvm_bn_AffinePoint ovm_r;
++        openvm_bn_mul(ovm_r, ovm_p, c);
++        openvm_bn_point_to_bytes(output, ovm_r);
++        return {EVMC_SUCCESS, 64};
++    }
+ #else
+     const auto res = evmmax::bn254::mul(*p, c);
+     const std::span<uint8_t, 64> output_span{output, 64};

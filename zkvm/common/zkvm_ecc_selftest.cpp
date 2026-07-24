@@ -115,6 +115,17 @@ extern "C" void z6m_ecc_selftest()
         std::memcmp(sum.data + 32, TWO_G_Y, 32) != 0)
         fail("z6m ecc selftest: bn254 g1_add wrong result");
 
+    // --- bn254 G1 add edge: G + (-G) == infinity (all-zero output) ------
+    zkvm_bn254_g1_point neg_g;
+    std::memcpy(neg_g.data, G1_X, 32);
+    std::memcpy(neg_g.data + 32, NEG_G1_Y, 32);
+    zkvm_bn254_g1_point inf;
+    if (zkvm_bn254_g1_add(&g, &neg_g, &inf) != ZKVM_EOK)
+        fail("z6m ecc selftest: bn254 g1_add(-G) errored");
+    for (size_t i = 0; i < 64; ++i)
+        if (inf.data[i] != 0)
+            fail("z6m ecc selftest: bn254 G + (-G) not infinity");
+
     // --- bn254 G1 mul: [7]G == 7G --------------------------------------
     zkvm_bn254_scalar seven;
     std::memcpy(seven.data, SEVEN_SCALAR, 32);

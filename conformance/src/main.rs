@@ -22,7 +22,7 @@ use stateless_validator_common::{
         input::{
             new_payload_request::{
                 ExecutionPayloadV3, ExecutionRequests, NewPayloadRequest,
-                NewPayloadRequestElectraFulu,
+                NewPayloadRequestElectraFulu, Withdrawal,
             },
             BlobSchedule, ChainConfig, ExecutionWitness, ForkActivation, ForkConfig, ProtocolFork,
             PUBLIC_KEY_BYTES,
@@ -63,6 +63,22 @@ enum Command {
         #[arg(long)]
         out_dir: PathBuf,
     },
+    /// Vectors for a real mainnet block from the payload/witness JSONs
+    /// produced by openvm-eth's `zilkworm-input` generator (Reth benchmark
+    /// witness pipeline). The mainnet ChainConfig is derived from the block
+    /// timestamp.
+    Reth {
+        /// payload.json with the block's execution payload fields.
+        #[arg(long)]
+        payload_json: PathBuf,
+        /// debug_executionWitness-style JSON with state/codes/headers hex arrays.
+        #[arg(long)]
+        witness_json: PathBuf,
+        #[arg(long, default_value = ".")]
+        out_dir: PathBuf,
+        #[arg(long, default_value = "block")]
+        name: String,
+    },
     /// Vectors from fixture files (e.g. zkboost's crates/server/tests/fixture/).
     Real {
         /// SSZ-encoded NewPayloadRequest (fork shape auto-detected newest-first).
@@ -89,6 +105,15 @@ fn main() -> anyhow::Result<()> {
         }
         Command::DebugRoots => debug_roots(),
         Command::Eest { fixtures, out_dir } => extract_eest(&fixtures, &out_dir),
+        Command::Reth {
+            payload_json,
+            witness_json,
+            out_dir,
+            name,
+        } => {
+            let (input, chain_config) = reth_input(&payload_json, &witness_json)?;
+            emit(&out_dir, &name, &input, &chain_config)
+        }
         Command::Real {
             npr,
             chain_config,
@@ -286,6 +311,187 @@ fn real_input(
 
     let witness_raw =
         fs::read_to_string(witness_json_path).with_context(|| format!("read {witness_json_path:?}"))?;
+    let witness = witness_from_json(&witness_raw)?;
+
+    let public_keys = recover_public_keys(&new_payload_request)?;
+
+    let input = StatelessInput {
+        new_payload_request,
+        witness,
+        chain_config: chain_config.clone(),
+        public_keys: SszList::try_from(public_keys)
+            .map_err(|e| anyhow::anyhow!("public_keys out of bounds: {e:?}"))?,
+    };
+    Ok((input, chain_config))
+}
+
+/// Mainnet ChainConfig for the fork active at `timestamp`, mirroring
+/// zilk_core's kMainnetConfig fork times and BlobParams schedule.
+fn mainnet_chain_config(timestamp: u64) -> anyhow::Result<ChainConfig> {
+    const PRAGUE_TIME: u64 = 1_746_612_311;
+    const OSAKA_TIME: u64 = 1_764_798_551;
+    const BPO1_TIME: u64 = 1_765_290_071;
+    const BPO2_TIME: u64 = 1_767_747_671;
+
+    let (fork, activation, target, max, fraction) = if timestamp >= BPO2_TIME {
+        (ProtocolFork::BPO2, BPO2_TIME, 14, 21, 11_684_671)
+    } else if timestamp >= BPO1_TIME {
+        (ProtocolFork::BPO1, BPO1_TIME, 10, 15, 8_346_193)
+    } else if timestamp >= OSAKA_TIME {
+        (ProtocolFork::Osaka, OSAKA_TIME, 6, 9, 5_007_716)
+    } else if timestamp >= PRAGUE_TIME {
+        (ProtocolFork::Prague, PRAGUE_TIME, 6, 9, 5_007_716)
+    } else {
+        anyhow::bail!("block timestamp {timestamp} predates Prague; unsupported")
+    };
+    Ok(ChainConfig {
+        chain_id: 1,
+        active_fork: ForkConfig::new(
+            fork,
+            ForkActivation::new(None, Some(activation)),
+            Some(BlobSchedule { target, max, base_fee_update_fraction: fraction }),
+        ),
+    })
+}
+
+/// Assembles a `StatelessInput` for a real mainnet block from the
+/// payload/witness JSONs emitted by openvm-eth's `zilkworm-input` generator.
+fn reth_input(
+    payload_path: &PathBuf,
+    witness_json_path: &PathBuf,
+) -> anyhow::Result<(StatelessInput, ChainConfig)> {
+    let raw = fs::read_to_string(payload_path).with_context(|| format!("read {payload_path:?}"))?;
+    let v: serde_json::Value = serde_json::from_str(&raw)?;
+
+    let hex_bytes = |key: &str| -> anyhow::Result<Vec<u8>> {
+        let s = v
+            .get(key)
+            .and_then(|x| x.as_str())
+            .with_context(|| format!("payload field {key} missing"))?;
+        hex::decode(s.trim_start_matches("0x")).with_context(|| format!("payload field {key} not hex"))
+    };
+    let fixed = |key: &str, out: &mut [u8]| -> anyhow::Result<()> {
+        let b = hex_bytes(key)?;
+        anyhow::ensure!(b.len() == out.len(), "payload field {key}: expected {} bytes, got {}", out.len(), b.len());
+        out.copy_from_slice(&b);
+        Ok(())
+    };
+    let num = |key: &str| -> anyhow::Result<u64> {
+        v.get(key).and_then(|x| x.as_u64()).with_context(|| format!("payload field {key} missing"))
+    };
+
+    let mut parent_hash = [0u8; 32];
+    fixed("parentHash", &mut parent_hash)?;
+    let mut fee_recipient = [0u8; 20];
+    fixed("feeRecipient", &mut fee_recipient)?;
+    let mut state_root = [0u8; 32];
+    fixed("stateRoot", &mut state_root)?;
+    let mut receipts_root = [0u8; 32];
+    fixed("receiptsRoot", &mut receipts_root)?;
+    let mut logs_bloom = [0u8; 256];
+    fixed("logsBloom", &mut logs_bloom)?;
+    let mut prev_randao = [0u8; 32];
+    fixed("prevRandao", &mut prev_randao)?;
+    let mut block_hash = [0u8; 32];
+    fixed("blockHash", &mut block_hash)?;
+    let mut parent_beacon_block_root = [0u8; 32];
+    fixed("parentBeaconBlockRoot", &mut parent_beacon_block_root)?;
+
+    // base fee: variable-length big-endian hex -> 32-byte little-endian SSZ uint256.
+    let mut base_fee_per_gas = [0u8; 32];
+    let base_fee_be = hex_bytes("baseFeePerGas")?;
+    anyhow::ensure!(base_fee_be.len() <= 32, "baseFeePerGas too large");
+    for (i, b) in base_fee_be.iter().rev().enumerate() {
+        base_fee_per_gas[i] = *b;
+    }
+
+    let transactions = v
+        .get("transactions")
+        .and_then(|x| x.as_array())
+        .context("payload field transactions missing")?
+        .iter()
+        .map(|t| {
+            let b = hex::decode(t.as_str().context("tx not a string")?.trim_start_matches("0x"))?;
+            SszList::try_from(b).map_err(|e| anyhow::anyhow!("tx too large: {e:?}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let withdrawals = v
+        .get("withdrawals")
+        .and_then(|x| x.as_array())
+        .context("payload field withdrawals missing")?
+        .iter()
+        .map(|w| -> anyhow::Result<Withdrawal> {
+            let addr_str = w.get("address").and_then(|x| x.as_str()).context("withdrawal address")?;
+            let addr_bytes = hex::decode(addr_str.trim_start_matches("0x"))?;
+            let mut address = [0u8; 20];
+            anyhow::ensure!(addr_bytes.len() == 20, "withdrawal address length");
+            address.copy_from_slice(&addr_bytes);
+            Ok(Withdrawal {
+                index: w.get("index").and_then(|x| x.as_u64()).context("withdrawal index")?,
+                validator_index: w
+                    .get("validatorIndex")
+                    .and_then(|x| x.as_u64())
+                    .context("withdrawal validatorIndex")?,
+                address,
+                amount: w.get("amount").and_then(|x| x.as_u64()).context("withdrawal amount")?,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let versioned_hashes = v
+        .get("versionedHashes")
+        .and_then(|x| x.as_array())
+        .context("payload field versionedHashes missing")?
+        .iter()
+        .map(|h| -> anyhow::Result<[u8; 32]> {
+            let b = hex::decode(h.as_str().context("versioned hash not a string")?.trim_start_matches("0x"))?;
+            anyhow::ensure!(b.len() == 32, "versioned hash length");
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&b);
+            Ok(out)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    let timestamp = num("timestamp")?;
+    let payload = ExecutionPayloadV3 {
+        parent_hash,
+        fee_recipient,
+        state_root,
+        receipts_root,
+        logs_bloom,
+        prev_randao,
+        block_number: num("blockNumber")?,
+        gas_limit: num("gasLimit")?,
+        gas_used: num("gasUsed")?,
+        timestamp,
+        extra_data: SszList::try_from(hex_bytes("extraData")?)
+            .map_err(|e| anyhow::anyhow!("extraData out of bounds: {e:?}"))?,
+        base_fee_per_gas,
+        block_hash,
+        transactions: SszList::try_from(transactions)
+            .map_err(|e| anyhow::anyhow!("too many transactions: {e:?}"))?,
+        withdrawals: SszList::try_from(withdrawals)
+            .map_err(|e| anyhow::anyhow!("too many withdrawals: {e:?}"))?,
+        blob_gas_used: num("blobGasUsed")?,
+        excess_blob_gas: num("excessBlobGas")?,
+    };
+
+    let new_payload_request = NewPayloadRequest::ElectraFulu(NewPayloadRequestElectraFulu {
+        execution_payload: payload,
+        versioned_hashes: SszList::try_from(versioned_hashes)
+            .map_err(|e| anyhow::anyhow!("too many versioned hashes: {e:?}"))?,
+        parent_beacon_block_root,
+        // Correct only for blocks whose header requestsHash is the
+        // empty-requests commitment (sha256 of the empty string); the
+        // generator's caller is responsible for checking this.
+        execution_requests: ExecutionRequests::default(),
+    });
+
+    let chain_config = mainnet_chain_config(timestamp)?;
+
+    let witness_raw = fs::read_to_string(witness_json_path)
+        .with_context(|| format!("read {witness_json_path:?}"))?;
     let witness = witness_from_json(&witness_raw)?;
 
     let public_keys = recover_public_keys(&new_payload_request)?;
