@@ -4,4 +4,4 @@
 # and by keygen/ dependency pins (keep in sync when bumping).
 sp1=6.3.1
 zisk=1.0.0-alpha
-openvm=2.0.0-rc.3
+openvm=develop-v2.1.0

@@ -29,7 +29,7 @@ include(${zilkworm_SOURCE_DIR}/third_party/evmone/cmake/cable/bootstrap.cmake)
 include(CableBuildType)
 cable_set_build_type(DEFAULT Release CONFIGURATION_TYPES Release)
 
-# Project (rv32im bare-metal for OpenVM)
+# Project (rv64im bare-metal for OpenVM)
 project(z6m_guest_openvm C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -90,7 +90,7 @@ target_include_directories(z6m_guest PRIVATE
     "${zilkworm_SOURCE_DIR}/third_party/evmone/lib/evmone_precompiles"
 )
 
-# Bare-metal linker options (rv32im)
+# Bare-metal linker options (rv64im)
 target_link_options(z6m_guest PRIVATE
     -nostdlib
     -nostartfiles
@@ -100,17 +100,17 @@ target_link_options(z6m_guest PRIVATE
     -Wl,-e,_start
 )
 
-# Locate the rv32im/ilp32 sysroot and libgcc
+# Locate the rv64im/lp64 sysroot and libgcc
 execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -march=rv32im -mabi=ilp32 -print-sysroot
+    COMMAND ${CMAKE_C_COMPILER} -march=rv64im -mabi=lp64 -print-sysroot
     OUTPUT_VARIABLE _SYSROOT OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -march=rv32im -mabi=ilp32 -print-multi-directory
+    COMMAND ${CMAKE_C_COMPILER} -march=rv64im -mabi=lp64 -print-multi-directory
     OUTPUT_VARIABLE _MULTIDIR OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -march=rv32im -mabi=ilp32 -print-libgcc-file-name
+    COMMAND ${CMAKE_C_COMPILER} -march=rv64im -mabi=lp64 -print-libgcc-file-name
     OUTPUT_VARIABLE _LIBGCC_FILE OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 get_filename_component(_LIBGCC_DIR "${_LIBGCC_FILE}" DIRECTORY)
@@ -169,5 +169,5 @@ add_custom_command(TARGET z6m_guest POST_BUILD
     COMMAND ${OBJCOPY} -O binary -j .text
         "$<TARGET_FILE:z6m_guest>"
         "${CMAKE_BINARY_DIR}/z6m_guest.text"
-    COMMENT "Generating flat binary images from z6m_guest.elf (OpenVM rv32im)"
+    COMMENT "Generating flat binary images from z6m_guest.elf (OpenVM rv64im)"
 )

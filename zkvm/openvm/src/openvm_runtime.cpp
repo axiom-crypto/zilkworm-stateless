@@ -1,20 +1,21 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* OpenVM zkVM runtime for pure C++ guest (rv32im bare-metal).
+/* OpenVM zkVM runtime for pure C++ guest (rv64im bare-metal).
  *
  * Provides: _start support (__start), a bump-allocator _sbrk for newlib
  * malloc, and read_vec_raw() built from OpenVM's hint-stream instructions.
  *
- * OpenVM memory layout (openvm-platform crate: crates/toolchain/platform/src/memory.rs):
+ * OpenVM memory layout (openvm-platform crate: crates/toolchain/platform/src/memory.rs,
+ * branch develop-v2.1.0 — identical addresses for the RV64 target):
  *   GUEST_MIN_MEM = 0x0000_0400   (lowest usable guest address)
  *   TEXT_START    = 0x0020_0800   (code loads here; heap starts after BSS)
  *   STACK_TOP     = 0x0020_0400   (initial SP; stack grows downward)
  *   MEM_SIZE      = 0x2000_0000   (512 MiB ceiling)
  *
- * Output is committed directly by main.cpp via openvm::reveal_u32() — unlike
+ * Output is committed directly by main.cpp via openvm::reveal_u64() — unlike
  * RISC0's tagged-hash journal scheme, OpenVM's public-output mechanism is
- * "reveal individual u32 words," so there is no journal buffer to maintain
+ * "reveal individual u64 words," so there is no journal buffer to maintain
  * here.
  */
 
@@ -51,34 +52,36 @@ extern "C" __attribute__((weak)) void __cxa_pure_virtual() { __builtin_trap(); }
 /* ─────────────────────────────────────────────────────────────────────────── *
  *  read_vec_raw – read one hint-stream input vector                            *
  *                                                                               *
- *  Mirrors openvm::io::read_vec() exactly (extensions/rv32im/guest/src/io.rs): *
+ *  Mirrors openvm::io::read_vec() exactly (crates/toolchain/openvm/src/io):    *
  *    1. hint_input()               – advance to the next hint stream           *
- *    2. hint_read_u32(scratch)     – read the 4-byte length prefix             *
- *    3. hint_buffer_chunked(...)   – read ceil(len/4) words, chunked at 1023   *
- *                                    words/instruction                         *
+ *    2. hint_read_u64(scratch)     – read the 8-byte length prefix             *
+ *    3. hint_buffer_chunked(...)   – read ceil(len/8) dwords, chunked at 1023  *
+ *                                    dwords/instruction                        *
  *                                                                               *
- *  Allocation is from the heap (via _sbrk), rounded up to a 4-byte boundary    *
- *  for word-aligned access, matching sp1_syscalls.hpp / risc0's read_vec_raw.  *
+ *  Allocation is from the heap (via _sbrk), rounded up to an 8-byte boundary   *
+ *  for dword-aligned access, matching sp1_syscalls.hpp / risc0's read_vec_raw. *
  * ─────────────────────────────────────────────────────────────────────────── */
 extern "C" openvm::ReadVecResult read_vec_raw() noexcept {
     using namespace openvm;
 
     hint_input();
 
-    /* 1. Read the 4-byte length prefix into a scratch word. */
-    uint32_t scratch = 0;
-    uint32_t len = hint_read_u32(&scratch);
+    /* 1. Read the 8-byte length prefix into an aligned scratch dword. */
+    alignas(8) uint64_t scratch = 0;
+    uint64_t len = hint_read_u64(&scratch);
 
     if (len == 0) [[unlikely]] {
         return {nullptr, 0, 0};
     }
 
-    /* 2. Allocate (round up to 4-byte boundary for word alignment). */
-    size_t capacity = (static_cast<size_t>(len) + 3) & ~size_t(3);
+    /* 2. Allocate (round up to 8-byte boundary for dword alignment; _heap_ptr
+          is initialised 8-aligned and only ever advanced by 8-multiples here,
+          so `ptr` is always dword-aligned as HINT_STORE requires). */
+    size_t capacity = (static_cast<size_t>(len) + 7) & ~size_t(7);
     uint8_t *ptr = static_cast<uint8_t *>(_sbrk(static_cast<ptrdiff_t>(capacity)));
 
-    /* 3. Read the payload, chunked at MAX_HINT_BUFFER_WORDS per instruction. */
-    hint_buffer_chunked(ptr, capacity / 4);
+    /* 3. Read the payload, chunked at MAX_HINT_BUFFER_DWORDS per instruction. */
+    hint_buffer_chunked(ptr, capacity / HINT_WORD_BYTES);
 
     return {ptr, static_cast<size_t>(len), capacity};
 }
@@ -104,9 +107,9 @@ extern "C" void zkvm_io_flush();
 
 extern "C" void __start() {
     /* 0. Initialise heap pointer from the zkvm-standards _heap_start
-          symbol. Align to 4 bytes (rv32im word width). */
+          symbol. Align to 8 bytes (rv64im dword width). */
     _heap_ptr = reinterpret_cast<char *>(
-        (reinterpret_cast<uintptr_t>(&_heap_start) + 3) & ~uintptr_t(3));
+        (reinterpret_cast<uintptr_t>(&_heap_start) + 7) & ~uintptr_t(7));
 
     /* 1. Run C++ global constructors. */
     for (auto p = __preinit_array_start; p != __preinit_array_end; ++p)
@@ -131,7 +134,7 @@ extern "C" void __start() {
 
 /* ───────── zkvm-standards io-interface ─────────
  * read_input: the first hint-stream vector, cached (idempotent).
- * write_output: append into a buffer; revealed word-by-word after main
+ * write_output: append into a buffer; revealed dword-by-dword after main
  * returns (__start calls zkvm_io_flush). */
 static const uint8_t *g_input_ptr = nullptr;
 static size_t g_input_len = 0;
@@ -158,13 +161,13 @@ extern "C" void write_output(const uint8_t *output, size_t size) {
 }
 
 extern "C" void zkvm_io_flush() {
-    // Reveal full+partial words; the final partial word is zero-padded and
-    // unrevealed words stay zero (required by zkboost).
-    for (size_t i = 0; i * 4 < g_output_len; ++i) {
-        uint32_t word = 0;
-        const size_t n = (g_output_len - i * 4 < 4) ? g_output_len - i * 4 : 4;
+    // Reveal full+partial dwords; the final partial dword is zero-padded and
+    // unrevealed dwords stay zero (required by zkboost).
+    for (size_t i = 0; i * 8 < g_output_len; ++i) {
+        uint64_t word = 0;
+        const size_t n = (g_output_len - i * 8 < 8) ? g_output_len - i * 8 : 8;
         for (size_t b = 0; b < n; ++b)
-            word |= static_cast<uint32_t>(g_output_buf[i * 4 + b]) << (8 * b);
-        openvm::reveal_u32(word, i);
+            word |= static_cast<uint64_t>(g_output_buf[i * 8 + b]) << (8 * b);
+        openvm::reveal_u64(word, i);
     }
 }

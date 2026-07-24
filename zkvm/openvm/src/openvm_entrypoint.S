@@ -1,9 +1,10 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-/* OpenVM zkVM entry point for rv32im C++ guest.
+/* OpenVM zkVM entry point for rv64im C++ guest.
  *
- * Memory layout (openvm-platform crate: crates/toolchain/platform/src/memory.rs):
+ * Memory layout (openvm-platform crate: crates/toolchain/platform/src/memory.rs,
+ * branch develop-v2.1.0 — the RV64 target keeps the same addresses):
  *   STACK_TOP  = 0x0020_0400   (initial SP; stack grows downward)
  *   TEXT_START = 0x0020_0800   (code loads here)
  *   MEM_SIZE   = 0x2000_0000   (512 MiB)

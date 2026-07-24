@@ -1,11 +1,12 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// memmove for rv32im (OpenVM zkVM).
+// Optimized memmove for OpenVM zkVM (rv64im).
 //
-// In practice memmove is called mostly by std::string for non-overlapping
-// regions.  Forward to memcpy on the fast path; backward byte copy for the
-// rare overlapping dst > src case.
+// In the guest, memmove is called extensively by std::string operations
+// (append, resize, copy) which never overlap. Forward to memcpy on
+// the fast path with a backward byte copy fallback for the rare
+// overlapping case.
 
 #include <cstring>
 
@@ -15,7 +16,7 @@ extern "C" void *memmove(void *dest, const void *src, size_t n) noexcept {
     if (d <= s || d >= s + n) [[likely]]
         return memcpy(dest, src, n);
 
-    // Overlapping, dst > src: copy backward to avoid clobbering source.
+    // Overlapping, dest > src: copy backward.
     d += n;
     s += n;
     while (n--)

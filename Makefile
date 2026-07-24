@@ -22,10 +22,10 @@ guest_zisk:
 		-DCMAKE_BUILD_TYPE=Release
 	cmake --build $(ROOT)/build/zisk -j$(NPROC)
 
-# ── OpenVM guest (rv32im bare-metal ELF) ─────────────────────────────────────
+# ── OpenVM guest (rv64im bare-metal ELF) ─────────────────────────────────────
 guest_openvm:
 	cmake -S $(ROOT)/zkvm/openvm -B $(ROOT)/build/openvm \
-		-DCMAKE_TOOLCHAIN_FILE=$(ROOT)/zkvm/openvm/cmake/riscv32im-openvm.cmake \
+		-DCMAKE_TOOLCHAIN_FILE=$(ROOT)/zkvm/openvm/cmake/riscv64im-openvm.cmake \
 		-DCMAKE_BUILD_TYPE=Release
 	cmake --build $(ROOT)/build/openvm -j$(NPROC)
 

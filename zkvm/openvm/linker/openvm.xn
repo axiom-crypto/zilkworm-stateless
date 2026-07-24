@@ -2,7 +2,7 @@
  * Copyright 2026 The Zilkworm Authors
  * SPDX-License-Identifier: MIT OR Apache-2.0
  *
- * Linker script for OpenVM zkVM guest (rv32im bare-metal).
+ * Linker script for OpenVM zkVM guest (rv64im bare-metal).
  *
  * Address layout (openvm-platform crate: crates/toolchain/platform/src/memory.rs):
  *   GUEST_MIN_MEM = 0x0000_0400   (below here is reserved)
@@ -14,7 +14,7 @@
  * Stack occupies [GUEST_MIN_MEM, STACK_TOP] (~2 MB).
  */
 
-OUTPUT_FORMAT("elf32-littleriscv", "elf32-littleriscv", "elf32-littleriscv")
+OUTPUT_FORMAT("elf64-littleriscv", "elf64-littleriscv", "elf64-littleriscv")
 OUTPUT_ARCH(riscv)
 ENTRY(_start)
 
@@ -126,10 +126,10 @@ SECTIONS
         *(.dynbss)
         *(.bss .bss.* .gnu.linkonce.b.*)
         *(COMMON)
-        . = ALIGN(. != 0 ? 4 : 1);
+        . = ALIGN(. != 0 ? 8 : 1);
     }
 
-    . = ALIGN(4);
+    . = ALIGN(8);
     __BSS_END__ = .;
 
     /* GP-relative addressing window (must follow __SDATA_BEGIN__ and __DATA_BEGIN__) */
@@ -140,7 +140,7 @@ SECTIONS
 
     /* Heap (zkvm-standards static-library-and-linker-script): end of BSS up
        to GUEST_MAX_MEM. */
-    _heap_start = ALIGN(4);
+    _heap_start = ALIGN(8);
     _heap_end   = 0x20000000;
     . = DATA_SEGMENT_END(.);
 

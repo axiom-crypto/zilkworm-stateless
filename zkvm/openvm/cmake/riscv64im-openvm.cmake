@@ -1,13 +1,12 @@
 # Copyright 2026 The Zilkworm Authors
 # SPDX-License-Identifier: MIT OR Apache-2.0
 
-# Cross-compilation toolchain for OpenVM zkVM guest (rv32im bare-metal).
+# Cross-compilation toolchain for OpenVM zkVM guest (rv64im bare-metal).
 #
-# OpenVM's target triple is "riscv32ima-unknown-none-elf", but its Rust
-# toolchain lowers every atomic instruction to a non-atomic equivalent at
-# compile time (the guest is single-threaded), so real codegen only needs
-# rv32im — no hardware 'A' extension required. Uses the same xPack
-# riscv-none-elf-gcc toolchain as the SP1/ZisK builds.
+# OpenVM branch develop-v2.1.0 executes RV64IM guests natively (the rvr
+# riscv64 extension); the guest is single-threaded, so no hardware 'A'
+# extension is required. Uses the same xPack riscv-none-elf-gcc toolchain
+# as the SP1/ZisK builds.
 #
 # One-time global install (no project files required):
 #   npm install --location=global xpm@latest
@@ -18,7 +17,7 @@
 #   Linux : ~/.local/xPacks/@xpack-dev-tools/riscv-none-elf-gcc/*/
 
 set(CMAKE_SYSTEM_NAME      Generic)
-set(CMAKE_SYSTEM_PROCESSOR riscv32)
+set(CMAKE_SYSTEM_PROCESSOR riscv64)
 
 # Toolchain auto-detection (same as SP1/ZisK)
 file(GLOB _XPACK_HINTS
@@ -41,7 +40,7 @@ if(NOT _RISCV_GCC)
 endif()
 
 get_filename_component(_RISCV_BIN "${_RISCV_GCC}" DIRECTORY)
-message(STATUS "RISC-V toolchain (rv32im): ${_RISCV_BIN}/riscv-none-elf-*")
+message(STATUS "RISC-V toolchain (rv64im): ${_RISCV_BIN}/riscv-none-elf-*")
 
 set(CMAKE_C_COMPILER   "${_RISCV_BIN}/riscv-none-elf-gcc")
 set(CMAKE_CXX_COMPILER "${_RISCV_BIN}/riscv-none-elf-g++")
@@ -52,10 +51,11 @@ set(CMAKE_OBJCOPY      "${_RISCV_BIN}/riscv-none-elf-objcopy")
 
 set(BUILD_SHARED_LIBS OFF)
 
-# rv32im: 32-bit RISC-V with integer multiply/divide (no floating-point, no
-# hardware atomics — OpenVM's compiler lowers atomic ops to non-atomic ones).
+# rv64im: 64-bit RISC-V with integer multiply/divide (no floating-point, no
+# hardware atomics — the guest is single-threaded, atomics are stubbed).
+# -mstrict-align: OpenVM requires naturally-aligned ld/sd/lw/sw.
 # Reproducible builds: strip absolute paths from __FILE__/debug info.
-set(_common_flags "-march=rv32im -mabi=ilp32 -ffunction-sections -fdata-sections -fno-PIC -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
+set(_common_flags "-march=rv64im -mabi=lp64 -mstrict-align -ffunction-sections -fdata-sections -fno-PIC -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
 set(_opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap")
 set(_no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
