@@ -16,8 +16,17 @@
 
 #include <cstdint>
 
+#ifdef Z6M_ECC_SELFTEST
+extern "C" void z6m_ecc_selftest();
+#endif
+
 extern "C" int main()
 {
+#ifdef Z6M_ECC_SELFTEST
+    // Validate the zkVM's ECC acceleration hooks against known vectors
+    // before touching the input (halts with a failure exit on mismatch).
+    z6m_ecc_selftest();
+#endif
     const uint8_t* buf_ptr;
     size_t buf_size;
     read_input(&buf_ptr, &buf_size);

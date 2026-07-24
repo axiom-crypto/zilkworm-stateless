@@ -78,6 +78,11 @@ add_subdirectory(
 # OpenVM guest binary
 set(LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/linker/openvm.xn")
 
+# Optional in-guest ECC self-test: validates the OpenVM ECC acceleration
+# hooks (bn254 add/mul/pairing) against known vectors before running block
+# validation. Debug/bring-up tool — leave OFF for benchmark ELFs.
+option(Z6M_ECC_SELFTEST "Run the in-guest ECC self-test before block validation" OFF)
+
 add_executable(z6m_guest
     src/openvm_entrypoint.S
     src/openvm_runtime.cpp
@@ -87,6 +92,11 @@ add_executable(z6m_guest
     src/memcpy.cpp
     src/memmove.cpp
 )
+
+if(Z6M_ECC_SELFTEST)
+    target_sources(z6m_guest PRIVATE ../common/zkvm_ecc_selftest.cpp)
+    target_compile_definitions(z6m_guest PRIVATE Z6M_ECC_SELFTEST)
+endif()
 
 target_include_directories(z6m_guest PRIVATE
     "${zilkworm_SOURCE_DIR}/third_party/evmone/lib"
