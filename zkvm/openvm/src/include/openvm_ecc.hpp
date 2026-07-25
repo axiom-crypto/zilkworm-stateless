@@ -64,16 +64,21 @@ namespace openvm {
 // zilkworm_vm_config() in openvm-eth (order of supported_moduli /
 // fp2 supported_moduli / ecc supported_curves).
 //   moduli:  0 = secp256k1 Fp, 1 = secp256k1 Fr (order n),
-//            2 = bn254 Fp,     3 = bn254 Fr (order r)
-//   fp2:     0 = bn254 Fp2
-//   curves:  0 = secp256k1,    1 = bn254 (G1)
+//            2 = bn254 Fp,     3 = bn254 Fr (order r),
+//            4 = bls12-381 Fp (48-byte limbs), 5 = bls12-381 Fr
+//   fp2:     0 = bn254 Fp2,    1 = bls12-381 Fp2
+//   curves:  0 = secp256k1,    1 = bn254 (G1), 2 = bls12-381 (G1)
 inline constexpr int MOD_SECP256K1_FP = 0;
 inline constexpr int MOD_SECP256K1_FR = 1;
 inline constexpr int MOD_BN254_FP = 2;
 inline constexpr int MOD_BN254_FR = 3;
+inline constexpr int MOD_BLS_FP = 4;
+inline constexpr int MOD_BLS_FR = 5;
 inline constexpr int FP2_BN254 = 0;
+inline constexpr int FP2_BLS = 1;
 inline constexpr int CURVE_SECP256K1 = 0;
 inline constexpr int CURVE_BN254 = 1;
+inline constexpr int CURVE_BLS_G1 = 2;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Raw instruction emitters. F7EXPR must be a literal arithmetic expression
@@ -167,6 +172,42 @@ alignas(8) inline constexpr uint8_t BN254_FR_LE[32] = {
     0x48, 0xe8, 0x33, 0x28, 0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8,
     0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30};
 
+// bls12-381: p (48 bytes little-endian)
+alignas(8) inline constexpr uint8_t BLS_FP_LE[48] = {
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
+    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
+    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
+    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a};
+// bls12-381: r (scalar field order, 32 bytes little-endian)
+alignas(8) inline constexpr uint8_t BLS_FR_LE[32] = {
+    0x01, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xfe, 0x5b, 0xfe, 0xff,
+    0x02, 0xa4, 0xbd, 0x53, 0x05, 0xd8, 0xa1, 0x09, 0x08, 0xd8, 0x39, 0x33,
+    0x48, 0x7d, 0x9d, 0x29, 0x53, 0xa7, 0xed, 0x73};
+// bls12-381 modulus twice for the Fp2 setup (one copy per coefficient).
+alignas(8) inline constexpr uint8_t BLS_FP2_MODULUS2[96] = {
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
+    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
+    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
+    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
+    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
+    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
+    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a};
+// bls12-381 curve setup p1 = (p || a) with a = 0.
+alignas(8) inline constexpr uint8_t BLS_CURVE_P1[96] = {
+    0xab, 0xaa, 0xff, 0xff, 0xff, 0xff, 0xfe, 0xb9, 0xff, 0xff, 0x53, 0xb1,
+    0xfe, 0xff, 0xab, 0x1e, 0x24, 0xf6, 0xb0, 0xf6, 0xa0, 0xd2, 0x30, 0x67,
+    0xbf, 0x12, 0x85, 0xf3, 0x84, 0x4b, 0x77, 0x64, 0xd7, 0xac, 0x4b, 0x43,
+    0xb6, 0xa7, 0x1b, 0x4b, 0x9a, 0xe6, 0x7f, 0x39, 0xea, 0x11, 0x01, 0x1a,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+// (x2, y2) = (1, 1) for the 96-byte-coordinate curve setups.
+alignas(8) inline constexpr uint8_t SW_SETUP_P2_48[96] = {
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
 // bn254 modulus twice (one copy per Fp2 coefficient) for the Fp2 setup.
 alignas(8) inline constexpr uint8_t BN254_FP2_MODULUS2[64] = {
     0x47, 0xfd, 0x7c, 0xd8, 0x16, 0x8c, 0x20, 0x3c, 0x8d, 0xca, 0x71, 0x68,
@@ -247,7 +288,38 @@ alignas(8) inline constexpr uint8_t SW_SETUP_P2[64] = {
     OPENVM_SW_SETUP(0, scratch, ecc_detail::SECP256K1_CURVE_P1, ecc_detail::SW_SETUP_P2);
     done = true;
 }
-[[gnu::noinline, gnu::cold]] inline void setup_bn254_curve() noexcept {
+[[gnu::noinline, gnu::cold]] [[gnu::noinline, gnu::cold]] inline void setup_bls_fp() noexcept {
+    static bool done = false;
+    if (done) [[likely]] return;
+    alignas(8) uint8_t scratch[48];
+    OPENVM_MOD_SETUP(4, scratch, ecc_detail::BLS_FP_LE);
+    done = true;
+}
+[[gnu::noinline, gnu::cold]] inline void setup_bls_fr() noexcept {
+    static bool done = false;
+    if (done) [[likely]] return;
+    alignas(8) uint8_t scratch[32];
+    OPENVM_MOD_SETUP(5, scratch, ecc_detail::BLS_FR_LE);
+    done = true;
+}
+[[gnu::noinline, gnu::cold]] inline void setup_bls_fp2() noexcept {
+    setup_bls_fp();
+    static bool done = false;
+    if (done) [[likely]] return;
+    alignas(8) uint8_t scratch[96];
+    OPENVM_FP2_SETUP(1, scratch, ecc_detail::BLS_FP2_MODULUS2);
+    done = true;
+}
+[[gnu::noinline, gnu::cold]] inline void setup_bls_curve() noexcept {
+    setup_bls_fp();
+    static bool done = false;
+    if (done) [[likely]] return;
+    alignas(8) uint8_t scratch[192];
+    OPENVM_SW_SETUP(2, scratch, ecc_detail::BLS_CURVE_P1, ecc_detail::SW_SETUP_P2_48);
+    done = true;
+}
+
+inline void setup_bn254_curve() noexcept {
     setup_bn254_fp();
     static bool done = false;
     if (done) [[likely]] return;
@@ -340,6 +412,72 @@ inline void secp256k1_ec_add_ne(void* dst, const void* p, const void* q) noexcep
 inline void secp256k1_ec_double(void* dst, const void* p) noexcept {
     setup_secp256k1_curve();
     OPENVM_SW_DOUBLE(0, dst, p);
+}
+
+// bn254 Fp2 division (dst = x / y); y must be invertible.
+inline void bn254_fp2_divmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bn254_fp2();
+    OPENVM_FP2_OP(0, 3, dst, x, y);
+}
+
+// bls12-381 base field (index 4); 48-byte LE canonical values.
+inline void bls_fp_addmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp();
+    OPENVM_MOD_OP(4, 0, dst, x, y);
+}
+inline void bls_fp_submod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp();
+    OPENVM_MOD_OP(4, 1, dst, x, y);
+}
+inline void bls_fp_mulmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp();
+    OPENVM_MOD_OP(4, 2, dst, x, y);
+}
+inline void bls_fp_divmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp();
+    OPENVM_MOD_OP(4, 3, dst, x, y);
+}
+
+// bls12-381 scalar field (index 5); 32-byte LE canonical values.
+inline void bls_fr_addmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fr();
+    OPENVM_MOD_OP(5, 0, dst, x, y);
+}
+inline void bls_fr_submod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fr();
+    OPENVM_MOD_OP(5, 1, dst, x, y);
+}
+inline void bls_fr_mulmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fr();
+    OPENVM_MOD_OP(5, 2, dst, x, y);
+}
+
+// bls12-381 Fp2 (index 1); operands are (c0 || c1), 96 bytes.
+inline void bls_fp2_addmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp2();
+    OPENVM_FP2_OP(1, 0, dst, x, y);
+}
+inline void bls_fp2_submod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp2();
+    OPENVM_FP2_OP(1, 1, dst, x, y);
+}
+inline void bls_fp2_mulmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp2();
+    OPENVM_FP2_OP(1, 2, dst, x, y);
+}
+inline void bls_fp2_divmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bls_fp2();
+    OPENVM_FP2_OP(1, 3, dst, x, y);
+}
+
+// bls12-381 G1 point ops (curve index 2); points (x || y), 96 bytes.
+inline void bls_ec_add_ne(void* dst, const void* p, const void* q) noexcept {
+    setup_bls_curve();
+    OPENVM_SW_ADD_NE(2, dst, p, q);
+}
+inline void bls_ec_double(void* dst, const void* p) noexcept {
+    setup_bls_curve();
+    OPENVM_SW_DOUBLE(2, dst, p);
 }
 
 // bn254 G1 point ops (curve index 1)

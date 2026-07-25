@@ -86,6 +86,7 @@ option(Z6M_ECC_SELFTEST "Run the in-guest ECC self-test before block validation"
 add_executable(z6m_guest
     src/openvm_entrypoint.S
     src/openvm_runtime.cpp
+    src/openvm_pairing.cpp
     ../common/main.cpp
     ../common/zkvm_accelerators.cpp
     src/atomic_stubs.c

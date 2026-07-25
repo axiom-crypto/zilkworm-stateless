@@ -126,6 +126,128 @@ index e1837a1..bd2e0ee 100644
          static constexpr bool BN_ACCELERATED = true;
  #endif
      };
+diff --git a/lib/evmone_precompiles/kzg.cpp b/lib/evmone_precompiles/kzg.cpp
+index b0a06a8..36fc552 100644
+--- a/lib/evmone_precompiles/kzg.cpp
++++ b/lib/evmone_precompiles/kzg.cpp
+@@ -4,6 +4,10 @@
+ 
+ #include "kzg.hpp"
+ #include <blst.h>
++
++#ifdef OPENVM
++#include <openvm_pairing.hpp>
++#endif
+ #include <algorithm>
+ #include <optional>
+ #include <span>
+@@ -135,6 +139,15 @@ bool kzg_verify_proof(const std::byte versioned_hash[VERSIONED_HASH_SIZE], const
+     if (!std::ranges::equal(std::span{versioned_hash, 32}, computed_versioned_hash))
+         return false;
+ 
++#ifdef OPENVM
++    // OpenVM-accelerated verification: native short-Weierstrass G1 ops,
++    // Fp2-instruction G2 arithmetic and the HintFinalExp pairing protocol.
++    // Performs its own scalar/point validation (including G1 subgroup checks).
++    return openvm_pairing::kzg_verify_proof(reinterpret_cast<const uint8_t*>(commitment),
++        reinterpret_cast<const uint8_t*>(z), reinterpret_cast<const uint8_t*>(y),
++        reinterpret_cast<const uint8_t*>(proof));
++#endif
++
+     // Load and validate scalars z and y.
+     // TODO(C++26): The span construction can be done as std::snap(z, std::c_<32>).
+     const auto zz = validate_scalar(std::span<const std::byte, 32>{z, 32});
+diff --git a/lib/evmone_precompiles/pairing/bn254/pairing.cpp b/lib/evmone_precompiles/pairing/bn254/pairing.cpp
+index 054d3aa..fdbaf46 100644
+--- a/lib/evmone_precompiles/pairing/bn254/pairing.cpp
++++ b/lib/evmone_precompiles/pairing/bn254/pairing.cpp
+@@ -2,6 +2,11 @@
+ // Copyright 2024 The evmone Authors.
+ // SPDX-License-Identifier: Apache-2.0
+ 
++#ifdef OPENVM
++#include <openvm_pairing.hpp>
++#include <cstring>
++#endif
++
+ #include "../../bn254.hpp"
+ #include "fields.hpp"
+ #include "utils.hpp"
+@@ -130,6 +135,7 @@ Fq12 final_exp(const Fq12& v) noexcept
+ 
+ std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pairs) noexcept
+ {
++#ifndef OPENVM
+     if (pairs.empty())
+         return true;
+ 
+@@ -168,5 +174,66 @@ std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pa
+ 
+     // final exp is calculated on accumulated value
+     return final_exp(f) == Fq12::one();
++
++}
++#endif  // !OPENVM
++
++#ifdef OPENVM
++// OpenVM path: same validation as above, then the HintFinalExp pairing
++// protocol over canonical little-endian coordinates (values are canonical
++// under BN_ACCELERATED).
++std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pairs) noexcept
++{
++    if (pairs.empty())
++        return true;
++
++    auto* p_buf = new uint8_t[pairs.size() * 64];
++    auto* q_buf = new uint8_t[pairs.size() * 128];
++    size_t n = 0;
++
++    const auto cleanup = [&](std::optional<bool> ret) {
++        delete[] q_buf;
++        delete[] p_buf;
++        return ret;
++    };
++
++    for (const auto& [p, q] : pairs)
++    {
++        if (!is_field_element(p.x) || !is_field_element(p.y) || !is_field_element(q.x.first) ||
++            !is_field_element(q.x.second) || !is_field_element(q.y.first) ||
++            !is_field_element(q.y.second))
++        {
++            return cleanup(std::nullopt);
++        }
++
++        const auto P_aff = ecc::Point<Fq>{Fq(p.x), Fq(p.y)};
++        const auto Q_aff = ecc::Point<Fq2>{
++            Fq2({Fq(q.x.first), Fq(q.x.second)}), Fq2({Fq(q.y.first), Fq(q.y.second)})};
++
++        const bool g1_is_inf = is_infinity(P_aff);
++        const bool g2_is_inf = g2_is_infinity(Q_aff);
++
++        if (!g1_is_inf && !is_on_curve(P_aff))
++            return cleanup(std::nullopt);
++
++        if (!g2_is_inf && (!is_on_twisted_curve(Q_aff) || !g2_subgroup_check(Q_aff)))
++            return cleanup(std::nullopt);
++
++        if (!g1_is_inf && !g2_is_inf)
++        {
++            // canonical little-endian x||y and x.c0||x.c1||y.c0||y.c1
++            std::memcpy(p_buf + n * 64, &p.x, 32);
++            std::memcpy(p_buf + n * 64 + 32, &p.y, 32);
++            std::memcpy(q_buf + n * 128, &q.x.first, 32);
++            std::memcpy(q_buf + n * 128 + 32, &q.x.second, 32);
++            std::memcpy(q_buf + n * 128 + 64, &q.y.first, 32);
++            std::memcpy(q_buf + n * 128 + 96, &q.y.second, 32);
++            ++n;
++        }
++    }
++
++    const bool ok = openvm_pairing::bn254_pairing_check(p_buf, q_buf, n);
++    return cleanup(ok);
+ }
++#endif  // OPENVM
+ }  // namespace evmmax::bn254
 diff --git a/lib/evmone_precompiles/pairing/field_template.hpp b/lib/evmone_precompiles/pairing/field_template.hpp
 index 76607fc..3efa95f 100644
 --- a/lib/evmone_precompiles/pairing/field_template.hpp

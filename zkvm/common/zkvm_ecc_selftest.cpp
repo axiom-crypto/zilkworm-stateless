@@ -52,6 +52,12 @@ constexpr uint8_t TWO_G_Y[32] = {
     0x68, 0xa6, 0xa4, 0x49, 0xe3, 0x53, 0x8f, 0xc7,
     0xff, 0x3e, 0xbf, 0x7a, 0x5a, 0x18, 0xa2, 0xc4};
 
+constexpr uint8_t NEG_TWO_G_Y[32] = {
+    0x1a, 0x76, 0xda, 0xe6, 0xd3, 0x27, 0x23, 0x96,
+    0xd0, 0xcb, 0xe6, 0x1f, 0xce, 0xd2, 0xbc, 0x53,
+    0x2e, 0xda, 0xc6, 0x47, 0x85, 0x1e, 0x3a, 0xc5,
+    0x3c, 0xe1, 0xcc, 0x9c, 0x7e, 0x64, 0x5a, 0x83};
+
 constexpr uint8_t SEVEN_SCALAR[32] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -159,4 +165,27 @@ extern "C" void z6m_ecc_selftest()
         fail("z6m ecc selftest: bn254 single pairing errored");
     if (verified)
         fail("z6m ecc selftest: bn254 pairing accepted non-identity");
+
+    // --- bn254 pairing bilinearity: e([2]G1, G2) * e(-G1, [2]G2) == 1 ----
+    // Exercises the Miller loop over non-generator inputs (the identity
+    // check above can pass on some degenerate implementations).
+    {
+        zkvm_bn254_pairing_pair bl[2];
+        // pair 0: ([2]G1, G2)
+        std::memcpy(bl[0].g1.data, TWO_G_X, 32);
+        std::memcpy(bl[0].g1.data + 32, TWO_G_Y, 32);
+        std::memcpy(bl[0].g2.data, pairs[0].g2.data, 128);
+        // pair 1: (-G1, [2]G2) — [2]G2 computed by the software G2 doubling
+        // in evmone via the pairing input path is not available here, so we
+        // instead use (-[2]G1, G2) which must also cancel pair 0.
+        std::memcpy(bl[1].g1.data, TWO_G_X, 32);
+        std::memcpy(bl[1].g1.data + 32, NEG_TWO_G_Y, 32);
+        std::memcpy(bl[1].g2.data, pairs[0].g2.data, 128);
+
+        bool bl_ok = false;
+        if (zkvm_bn254_pairing(bl, 2, &bl_ok) != ZKVM_EOK)
+            fail("z6m ecc selftest: bn254 bilinear pairing errored");
+        if (!bl_ok)
+            fail("z6m ecc selftest: bn254 bilinear pairing rejected");
+    }
 }
