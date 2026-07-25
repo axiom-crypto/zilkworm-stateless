@@ -478,7 +478,7 @@ index 76607fc..3efa95f 100644
          return multiply(e1, e2);
      }
 diff --git a/lib/evmone_precompiles/secp256k1.cpp b/lib/evmone_precompiles/secp256k1.cpp
-index 631013d..2cf7ae3 100644
+index 631013d..4310f2c 100644
 --- a/lib/evmone_precompiles/secp256k1.cpp
 +++ b/lib/evmone_precompiles/secp256k1.cpp
 @@ -13,6 +13,12 @@
@@ -708,6 +708,33 @@ index 631013d..2cf7ae3 100644
  #else
      const auto pubkey = secp256k1_ecdsa_recover(hash, r_bytes, s_bytes, parity);
      if (!pubkey.has_value())
+@@ -704,6 +910,26 @@ std::optional<evmc::address> ecrecover(std::span<const uint8_t, 32> hash,
+ 
+ std::optional<Curve::Fp> field_sqrt(const Curve::Fp& x) noexcept
+ {
++#ifdef OPENVM
++    // Ask the host for the root (ModArith HintSqrt) instead of running the
++    // 253-squaring addition chain below. The hint is untrusted, so the
++    // candidate is fully verified: it must be reduced and square to `x`.
++    //
++    // A negative answer is not trusted either — proving non-residuosity
++    // needs the non-QR witness — so we simply fall through to the software
++    // chain, which stays sound. Valid signatures take the fast path.
++    {
++        const auto xv = x.value();
++        uint256 root_v;
++        if (openvm::secp256k1_fp_hint_sqrt(&xv, &root_v) && root_v < Curve::FIELD_PRIME)
++        {
++            const Curve::Fp root{root_v};
++            if (root * root == x)
++                return root;
++        }
++    }
++#endif
++
+     // Computes modular exponentiation
+     // x^0x3fffffffffffffffffffffffffffffffffffffffffffffffffffffffbfffff0c
+     // Operations: 253 squares 13 multiplies
 diff --git a/lib/evmone_precompiles/secp256k1.hpp b/lib/evmone_precompiles/secp256k1.hpp
 index cdcd92d..0308775 100644
 --- a/lib/evmone_precompiles/secp256k1.hpp

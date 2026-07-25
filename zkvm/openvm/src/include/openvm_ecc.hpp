@@ -5,6 +5,10 @@
 #include <cstddef> // size_t
 #include <cstdint> // uint8_t, uint64_t
 
+// hint_store_u64 / hint_buffer_chunked / HINT_WORD_BYTES for the
+// hint-based square root below.
+#include "openvm_syscalls.hpp"
+
 // OpenVM guest ABI — modular-arithmetic / elliptic-curve custom instructions
 // (RV64IM, openvm-org/openvm  branch develop-v2.1.0).
 //
@@ -408,6 +412,39 @@ inline void bn254_fp2_submod(void* dst, const void* x, const void* y) noexcept {
 inline void bn254_fp2_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp2();
     OPENVM_FP2_OP(0, 2, dst, x, y);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Hint-based square root (ModArithBaseFunct7::HintSqrt = kind 7).
+//
+// The instruction pushes (is_square: u64, root: N bytes) onto the hint
+// stream; the guest reads them back and must verify, since a hint is
+// untrusted. This replaces the 253-squaring / 13-multiply addition chain
+// evmone uses for secp256k1 point decompression with one hint plus one
+// multiply.
+//
+// Returns true when the host claims `x` is a quadratic residue and writes
+// the candidate root to `out`. The caller MUST check `out * out == x` (and
+// that `out` is reduced). A `false` return is NOT proof that `x` is a
+// non-residue — verifying that claim needs the non-QR witness — so callers
+// should fall back to computing the root themselves, which stays sound.
+// ─────────────────────────────────────────────────────────────────────────
+inline bool secp256k1_fp_hint_sqrt(const void* x, void* out) noexcept {
+    setup_secp256k1_fp();
+    asm volatile(".insn r 0x2b, 0b000, (2*8 + 7), x0, %0, x0" :: "r"(x) : "memory");
+    alignas(8) uint64_t is_square = 0;
+    hint_store_u64(&is_square);
+    hint_buffer_chunked(static_cast<uint8_t*>(out), 32 / HINT_WORD_BYTES);
+    return is_square == 1;
+}
+
+inline bool bn254_fp_hint_sqrt(const void* x, void* out) noexcept {
+    setup_bn254_fp();
+    asm volatile(".insn r 0x2b, 0b000, (0*8 + 7), x0, %0, x0" :: "r"(x) : "memory");
+    alignas(8) uint64_t is_square = 0;
+    hint_store_u64(&is_square);
+    hint_buffer_chunked(static_cast<uint8_t*>(out), 32 / HINT_WORD_BYTES);
+    return is_square == 1;
 }
 
 // secp256k1 curve point ops (curve index 0); points (x || y), 64 bytes.
