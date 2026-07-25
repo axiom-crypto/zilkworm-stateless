@@ -6,7 +6,7 @@
 #include <cstdint> // uint8_t, uint64_t
 
 // OpenVM guest ABI — modular-arithmetic / elliptic-curve custom instructions
-// (RV64IM, openvm-org/openvm @ branch develop-v2.1.0).
+// (RV64IM, openvm-org/openvm  branch develop-v2.1.0).
 //
 // All encodings verified directly against the pinned OpenVM source:
 //   - extensions/algebra/guest/src/lib.rs   (OPCODE=0x2b, MODULAR_ARITHMETIC_FUNCT3,
@@ -63,22 +63,29 @@ namespace openvm {
 // Index assignments — keep in sync with bin/zilkworm-benchmark's
 // zilkworm_vm_config() in openvm-eth (order of supported_moduli /
 // fp2 supported_moduli / ecc supported_curves).
-//   moduli:  0 = secp256k1 Fp, 1 = secp256k1 Fr (order n),
-//            2 = bn254 Fp,     3 = bn254 Fr (order r),
-//            4 = bls12-381 Fp (48-byte limbs), 5 = bls12-381 Fr
-//   fp2:     0 = bn254 Fp2,    1 = bls12-381 Fp2
-//   curves:  0 = secp256k1,    1 = bn254 (G1), 2 = bls12-381 (G1)
-inline constexpr int MOD_SECP256K1_FP = 0;
-inline constexpr int MOD_SECP256K1_FR = 1;
-inline constexpr int MOD_BN254_FP = 2;
-inline constexpr int MOD_BN254_FR = 3;
-inline constexpr int MOD_BLS_FP = 4;
-inline constexpr int MOD_BLS_FR = 5;
+// These MUST match SdkVmConfig::standard() (openvm crates/sdk-config), which
+// is the config the openvm-eth benchmark hosts use, so the Zilkworm and Reth
+// guests run on an identical circuit:
+//   moduli:  0 = bn254 Fp,     1 = bn254 Fr,
+//            2 = secp256k1 Fp, 3 = secp256k1 Fr,
+//            4 = p256 Fp,      5 = p256 Fr,
+//            6 = bls12-381 Fp (48-byte limbs), 7 = bls12-381 Fr
+//   fp2:     0 = Bn254Fp2,     1 = Bls12_381Fp2
+//   curves:  0 = bn254 G1,     1 = secp256k1, 2 = p256, 3 = bls12-381 G1
+inline constexpr int MOD_BN254_FP = 0;
+inline constexpr int MOD_BN254_FR = 1;
+inline constexpr int MOD_SECP256K1_FP = 2;
+inline constexpr int MOD_SECP256K1_FR = 3;
+inline constexpr int MOD_P256_FP = 4;
+inline constexpr int MOD_P256_FR = 5;
+inline constexpr int MOD_BLS_FP = 6;
+inline constexpr int MOD_BLS_FR = 7;
 inline constexpr int FP2_BN254 = 0;
 inline constexpr int FP2_BLS = 1;
-inline constexpr int CURVE_SECP256K1 = 0;
-inline constexpr int CURVE_BN254 = 1;
-inline constexpr int CURVE_BLS_G1 = 2;
+inline constexpr int CURVE_BN254 = 0;
+inline constexpr int CURVE_SECP256K1 = 1;
+inline constexpr int CURVE_P256 = 2;
+inline constexpr int CURVE_BLS_G1 = 3;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Raw instruction emitters. F7EXPR must be a literal arithmetic expression
@@ -248,28 +255,28 @@ alignas(8) inline constexpr uint8_t SW_SETUP_P2[64] = {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[32];
-    OPENVM_MOD_SETUP(0, scratch, ecc_detail::SECP256K1_FP_LE);
+    OPENVM_MOD_SETUP(2, scratch, ecc_detail::SECP256K1_FP_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_secp256k1_fr() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[32];
-    OPENVM_MOD_SETUP(1, scratch, ecc_detail::SECP256K1_FR_LE);
+    OPENVM_MOD_SETUP(3, scratch, ecc_detail::SECP256K1_FR_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_bn254_fp() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[32];
-    OPENVM_MOD_SETUP(2, scratch, ecc_detail::BN254_FP_LE);
+    OPENVM_MOD_SETUP(0, scratch, ecc_detail::BN254_FP_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_bn254_fr() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[32];
-    OPENVM_MOD_SETUP(3, scratch, ecc_detail::BN254_FR_LE);
+    OPENVM_MOD_SETUP(1, scratch, ecc_detail::BN254_FR_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_bn254_fp2() noexcept {
@@ -285,21 +292,21 @@ alignas(8) inline constexpr uint8_t SW_SETUP_P2[64] = {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[128];
-    OPENVM_SW_SETUP(0, scratch, ecc_detail::SECP256K1_CURVE_P1, ecc_detail::SW_SETUP_P2);
+    OPENVM_SW_SETUP(1, scratch, ecc_detail::SECP256K1_CURVE_P1, ecc_detail::SW_SETUP_P2);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] [[gnu::noinline, gnu::cold]] inline void setup_bls_fp() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[48];
-    OPENVM_MOD_SETUP(4, scratch, ecc_detail::BLS_FP_LE);
+    OPENVM_MOD_SETUP(6, scratch, ecc_detail::BLS_FP_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_bls_fr() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[32];
-    OPENVM_MOD_SETUP(5, scratch, ecc_detail::BLS_FR_LE);
+    OPENVM_MOD_SETUP(7, scratch, ecc_detail::BLS_FR_LE);
     done = true;
 }
 [[gnu::noinline, gnu::cold]] inline void setup_bls_fp2() noexcept {
@@ -315,7 +322,7 @@ alignas(8) inline constexpr uint8_t SW_SETUP_P2[64] = {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[192];
-    OPENVM_SW_SETUP(2, scratch, ecc_detail::BLS_CURVE_P1, ecc_detail::SW_SETUP_P2_48);
+    OPENVM_SW_SETUP(3, scratch, ecc_detail::BLS_CURVE_P1, ecc_detail::SW_SETUP_P2_48);
     done = true;
 }
 
@@ -324,7 +331,7 @@ inline void setup_bn254_curve() noexcept {
     static bool done = false;
     if (done) [[likely]] return;
     alignas(8) uint8_t scratch[128];
-    OPENVM_SW_SETUP(1, scratch, ecc_detail::BN254_CURVE_P1, ecc_detail::SW_SETUP_P2);
+    OPENVM_SW_SETUP(0, scratch, ecc_detail::BN254_CURVE_P1, ecc_detail::SW_SETUP_P2);
     done = true;
 }
 
@@ -337,56 +344,56 @@ inline void setup_bn254_curve() noexcept {
 // secp256k1 base field (index 0)
 inline void secp256k1_fp_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fp();
-    OPENVM_MOD_OP(0, 0, dst, x, y);
+    OPENVM_MOD_OP(2, 0, dst, x, y);
 }
 inline void secp256k1_fp_submod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fp();
-    OPENVM_MOD_OP(0, 1, dst, x, y);
+    OPENVM_MOD_OP(2, 1, dst, x, y);
 }
 inline void secp256k1_fp_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fp();
-    OPENVM_MOD_OP(0, 2, dst, x, y);
+    OPENVM_MOD_OP(2, 2, dst, x, y);
 }
 // dst = x / y; y must be invertible (callers must guard y != 0).
 inline void secp256k1_fp_divmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fp();
-    OPENVM_MOD_OP(0, 3, dst, x, y);
+    OPENVM_MOD_OP(2, 3, dst, x, y);
 }
 
 // secp256k1 scalar field (index 1)
 inline void secp256k1_fr_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fr();
-    OPENVM_MOD_OP(1, 0, dst, x, y);
+    OPENVM_MOD_OP(3, 0, dst, x, y);
 }
 inline void secp256k1_fr_submod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fr();
-    OPENVM_MOD_OP(1, 1, dst, x, y);
+    OPENVM_MOD_OP(3, 1, dst, x, y);
 }
 inline void secp256k1_fr_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fr();
-    OPENVM_MOD_OP(1, 2, dst, x, y);
+    OPENVM_MOD_OP(3, 2, dst, x, y);
 }
 inline void secp256k1_fr_divmod(void* dst, const void* x, const void* y) noexcept {
     setup_secp256k1_fr();
-    OPENVM_MOD_OP(1, 3, dst, x, y);
+    OPENVM_MOD_OP(3, 3, dst, x, y);
 }
 
 // bn254 base field (index 2)
 inline void bn254_fp_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp();
-    OPENVM_MOD_OP(2, 0, dst, x, y);
+    OPENVM_MOD_OP(0, 0, dst, x, y);
 }
 inline void bn254_fp_submod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp();
-    OPENVM_MOD_OP(2, 1, dst, x, y);
+    OPENVM_MOD_OP(0, 1, dst, x, y);
 }
 inline void bn254_fp_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp();
-    OPENVM_MOD_OP(2, 2, dst, x, y);
+    OPENVM_MOD_OP(0, 2, dst, x, y);
 }
 inline void bn254_fp_divmod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp();
-    OPENVM_MOD_OP(2, 3, dst, x, y);
+    OPENVM_MOD_OP(0, 3, dst, x, y);
 }
 
 // bn254 Fp2 (index 0); operands are (c0 || c1), 64 bytes.
@@ -407,11 +414,11 @@ inline void bn254_fp2_mulmod(void* dst, const void* x, const void* y) noexcept {
 // add_ne REQUIRES p.x != q.x and neither operand the identity.
 inline void secp256k1_ec_add_ne(void* dst, const void* p, const void* q) noexcept {
     setup_secp256k1_curve();
-    OPENVM_SW_ADD_NE(0, dst, p, q);
+    OPENVM_SW_ADD_NE(1, dst, p, q);
 }
 inline void secp256k1_ec_double(void* dst, const void* p) noexcept {
     setup_secp256k1_curve();
-    OPENVM_SW_DOUBLE(0, dst, p);
+    OPENVM_SW_DOUBLE(1, dst, p);
 }
 
 // bn254 Fp2 division (dst = x / y); y must be invertible.
@@ -423,33 +430,33 @@ inline void bn254_fp2_divmod(void* dst, const void* x, const void* y) noexcept {
 // bls12-381 base field (index 4); 48-byte LE canonical values.
 inline void bls_fp_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fp();
-    OPENVM_MOD_OP(4, 0, dst, x, y);
+    OPENVM_MOD_OP(6, 0, dst, x, y);
 }
 inline void bls_fp_submod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fp();
-    OPENVM_MOD_OP(4, 1, dst, x, y);
+    OPENVM_MOD_OP(6, 1, dst, x, y);
 }
 inline void bls_fp_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fp();
-    OPENVM_MOD_OP(4, 2, dst, x, y);
+    OPENVM_MOD_OP(6, 2, dst, x, y);
 }
 inline void bls_fp_divmod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fp();
-    OPENVM_MOD_OP(4, 3, dst, x, y);
+    OPENVM_MOD_OP(6, 3, dst, x, y);
 }
 
 // bls12-381 scalar field (index 5); 32-byte LE canonical values.
 inline void bls_fr_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fr();
-    OPENVM_MOD_OP(5, 0, dst, x, y);
+    OPENVM_MOD_OP(7, 0, dst, x, y);
 }
 inline void bls_fr_submod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fr();
-    OPENVM_MOD_OP(5, 1, dst, x, y);
+    OPENVM_MOD_OP(7, 1, dst, x, y);
 }
 inline void bls_fr_mulmod(void* dst, const void* x, const void* y) noexcept {
     setup_bls_fr();
-    OPENVM_MOD_OP(5, 2, dst, x, y);
+    OPENVM_MOD_OP(7, 2, dst, x, y);
 }
 
 // bls12-381 Fp2 (index 1); operands are (c0 || c1), 96 bytes.
@@ -473,21 +480,21 @@ inline void bls_fp2_divmod(void* dst, const void* x, const void* y) noexcept {
 // bls12-381 G1 point ops (curve index 2); points (x || y), 96 bytes.
 inline void bls_ec_add_ne(void* dst, const void* p, const void* q) noexcept {
     setup_bls_curve();
-    OPENVM_SW_ADD_NE(2, dst, p, q);
+    OPENVM_SW_ADD_NE(3, dst, p, q);
 }
 inline void bls_ec_double(void* dst, const void* p) noexcept {
     setup_bls_curve();
-    OPENVM_SW_DOUBLE(2, dst, p);
+    OPENVM_SW_DOUBLE(3, dst, p);
 }
 
 // bn254 G1 point ops (curve index 1)
 inline void bn254_ec_add_ne(void* dst, const void* p, const void* q) noexcept {
     setup_bn254_curve();
-    OPENVM_SW_ADD_NE(1, dst, p, q);
+    OPENVM_SW_ADD_NE(0, dst, p, q);
 }
 inline void bn254_ec_double(void* dst, const void* p) noexcept {
     setup_bn254_curve();
-    OPENVM_SW_DOUBLE(1, dst, p);
+    OPENVM_SW_DOUBLE(0, dst, p);
 }
 
 } // namespace openvm
