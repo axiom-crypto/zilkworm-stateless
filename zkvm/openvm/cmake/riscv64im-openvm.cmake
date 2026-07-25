@@ -71,6 +71,9 @@ set(BUILD_SHARED_LIBS OFF)
 #   + -mtune=generic-ooo + memcpy:  603,344,555 /  94   (-29% / -21%)
 # Reproducible builds: strip absolute paths from __FILE__/debug info.
 set(_common_flags "-march=rv64im -mabi=lp64 -mno-strict-align -mtune=generic-ooo -ffunction-sections -fdata-sections -fno-PIC -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
+# Measured on mainnet block 24001988: adding -flto=auto cost
+# +15M instructions and +1 segment (586,804,615/62 -> 602,045,419/63),
+# so LTO stays off.
 set(_opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap")
 set(_no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 
