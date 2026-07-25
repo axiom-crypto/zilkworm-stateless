@@ -53,9 +53,14 @@ set(BUILD_SHARED_LIBS OFF)
 
 # rv64im: 64-bit RISC-V with integer multiply/divide (no floating-point, no
 # hardware atomics — the guest is single-threaded, atomics are stubbed).
-# -mstrict-align: OpenVM requires naturally-aligned ld/sd/lw/sw.
+# -mno-strict-align: OpenVM's RV64 load/store adapters resolve an arbitrary
+# byte offset within the 8-byte memory block (and a block-crossing access)
+# inside a single instruction, so misaligned accesses are supported natively.
+# Forcing strict alignment made GCC expand every possibly-unaligned access
+# into byte loads/stores plus shifts — very costly for a codebase built on
+# byte-buffer RLP/MPT/hashing work.
 # Reproducible builds: strip absolute paths from __FILE__/debug info.
-set(_common_flags "-march=rv64im -mabi=lp64 -mstrict-align -ffunction-sections -fdata-sections -fno-PIC -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
+set(_common_flags "-march=rv64im -mabi=lp64 -mno-strict-align -ffunction-sections -fdata-sections -fno-PIC -ffile-prefix-map=${CMAKE_SOURCE_DIR}=. -ffile-prefix-map=${CMAKE_BINARY_DIR}=build")
 set(_opt_flags    "-O3 -DNDEBUG -fno-stack-protector -fno-builtin-trap")
 set(_no_cxx       "-fno-exceptions -fno-rtti -fno-threadsafe-statics")
 

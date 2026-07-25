@@ -6,15 +6,20 @@
 // This is musl libc's memcpy.c compiled to rv64im assembly by clang,
 // embedded as GCC inline assembly.
 //
-// We use pre-compiled assembly rather than plain C because:
-//   1. The shift-merge loops for misaligned copies load from unaligned
-//      offsets (e.g. *(uint64_t*)(s+1)). Clang optimizes these into
-//      loads from the aligned base pointer with negative offsets
-//      (e.g. "ld a7, -24(a1)"), which are valid aligned accesses.
-//      GCC does NOT perform this transformation — it emits unaligned
-//      loads directly, which crash in the zkVM (ld/sd require 8-byte alignment).
-//   2. Clang's register allocation for the shift-merge loops is tighter
+// OpenVM supports misaligned ld/sd natively, so this implementation is not
+// required for correctness the way it is on SP1 — but it is still the
+// fastest option measured. Replacing it with a straightforward
+// dword-at-a-time C loop (which misaligned support makes legal) cost
+// +193M instructions on mainnet block 24001988 (846.6M -> 1,040.1M),
+// because this version dispatches small copies through a jump table and
+// keeps a 32-byte unrolled body, while GCC's codegen for the naive loop
+// pays per-iteration bounds checks on the small copies that dominate
+// (32-byte hashes, MPT node fragments).
+//
+// Keep the pre-compiled assembly:
+//   1. Clang's register allocation for the shift-merge loops is tighter
 //      than what GCC produces from equivalent C.
+//   2. The size dispatch avoids loop overhead on short copies.
 //
 // Original source: musl libc src/string/memcpy.c (MIT license).
 // Compiled by: clang --target=riscv64 -march=rv64im -O2 -fno-builtin
