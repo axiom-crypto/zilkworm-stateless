@@ -41,3 +41,6 @@ apply_patch() { # <dir> <patch>
 
 # OpenVM ECC/pairing acceleration hooks in the zvm1 (evmone) submodule.
 apply_patch third_party/evmone "$PATCH_DIR/zvm1-openvm-accel.patch"
+
+# Int256 acceleration for intx::uint256 (EVM 256-bit stack arithmetic).
+apply_patch third_party/intx "$PATCH_DIR/intx-openvm-int256.patch"

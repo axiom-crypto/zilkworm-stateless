@@ -1,0 +1,142 @@
+diff --git a/include/intx/intx.hpp b/include/intx/intx.hpp
+index 2096746..84a0d80 100644
+--- a/include/intx/intx.hpp
++++ b/include/intx/intx.hpp
+@@ -60,6 +60,11 @@
+     #define INTX_HAS_BUILTIN_INT128 0
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_int256.hpp>
++#include <type_traits>
++#endif
++
+ namespace intx
+ {
+ /// Mark a possible code path as unreachable (invokes undefined behavior).
+@@ -975,6 +980,17 @@ public:
+ 
+     friend constexpr uint operator+(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::add(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         return addc(x, y).value;
+     }
+ 
+@@ -984,6 +1000,17 @@ public:
+ 
+     friend constexpr uint operator-(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::sub(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         return subc(x, y).value;
+     }
+ 
+@@ -993,6 +1020,17 @@ public:
+     /// and discarding the high part of the result product.
+     friend constexpr uint operator*(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::mul(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         uint<N> p;
+         for (size_t j = 0; j < num_words; j++)
+         {
+@@ -1036,6 +1074,17 @@ public:
+ 
+     friend constexpr uint operator|(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::bit_or(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         uint z;
+         for (size_t i = 0; i < num_words; ++i)
+             z[i] = x[i] | y[i];
+@@ -1046,6 +1095,17 @@ public:
+ 
+     friend constexpr uint operator&(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::bit_and(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         uint z;
+         for (size_t i = 0; i < num_words; ++i)
+             z[i] = x[i] & y[i];
+@@ -1056,6 +1116,17 @@ public:
+ 
+     friend constexpr uint operator^(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::bit_xor(&z, &x, &y);
++                return z;
++            }
++        }
++#endif
+         uint z;
+         for (size_t i = 0; i < num_words; ++i)
+             z[i] = x[i] ^ y[i];
+@@ -1074,6 +1145,17 @@ public:
+ 
+     friend constexpr bool operator<(const uint& x, const uint& y) noexcept
+     {
++#ifdef OPENVM
++        if constexpr (N == 256)
++        {
++            if (!std::is_constant_evaluated())
++            {
++                uint z;
++                openvm_int256::sltu(&z, &x, &y);
++                return (z[0] & 1) != 0;
++            }
++        }
++#endif
+         if constexpr (N == 256)
+         {
+             auto xp = uint128{x[2], x[3]};
