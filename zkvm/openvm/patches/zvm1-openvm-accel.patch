@@ -1,57 +1,115 @@
 diff --git a/include/evmmax/evmmax.hpp b/include/evmmax/evmmax.hpp
-index ffc4435..e9d7f34 100644
+index ffc4435..f002e31 100644
 --- a/include/evmmax/evmmax.hpp
 +++ b/include/evmmax/evmmax.hpp
-@@ -14,6 +14,10 @@
+@@ -14,6 +14,46 @@
  #include <zisk_syscalls.hpp>
  #endif
  
 +#ifdef OPENVM
 +#include <openvm_ecc.hpp>
++
++namespace evmmax::openvm_detail
++{
++/// Maps an OpenVM modulus index (SdkVmConfig::standard() ordering) to the
++/// matching custom-instruction wrapper. Only the fields evmone actually
++/// drives through ModArith are listed; anything else stays on software.
++template <int IDX>
++struct ModOps;
++
++template <>
++struct ModOps<0>  // bn254 Fp
++{
++    static void add(void* d, const void* x, const void* y) { openvm::bn254_fp_addmod(d, x, y); }
++    static void sub(void* d, const void* x, const void* y) { openvm::bn254_fp_submod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) { openvm::bn254_fp_mulmod(d, x, y); }
++    static void div(void* d, const void* x, const void* y) { openvm::bn254_fp_divmod(d, x, y); }
++};
++
++template <>
++struct ModOps<2>  // secp256k1 Fp
++{
++    static void add(void* d, const void* x, const void* y) { openvm::secp256k1_fp_addmod(d, x, y); }
++    static void sub(void* d, const void* x, const void* y) { openvm::secp256k1_fp_submod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) { openvm::secp256k1_fp_mulmod(d, x, y); }
++    static void div(void* d, const void* x, const void* y) { openvm::secp256k1_fp_divmod(d, x, y); }
++};
++
++template <>
++struct ModOps<3>  // secp256k1 Fr
++{
++    static void add(void* d, const void* x, const void* y) { openvm::secp256k1_fr_addmod(d, x, y); }
++    static void sub(void* d, const void* x, const void* y) { openvm::secp256k1_fr_submod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) { openvm::secp256k1_fr_mulmod(d, x, y); }
++    static void div(void* d, const void* x, const void* y) { openvm::secp256k1_fr_divmod(d, x, y); }
++};
++}  // namespace evmmax::openvm_detail
 +#endif
 +
  namespace evmmax
  {
  /// Compute the modular inverse of the number modulo 2³²: inv⋅a = 1 mod 2³².
-@@ -90,7 +94,7 @@ class ModArith
+@@ -68,7 +108,11 @@ constexpr std::pair<uint64_t, uint64_t> addmul(
+ }
+ 
+ /// The modular arithmetic operations for EVMMAX (EVM Modular Arithmetic Extensions).
++#ifdef OPENVM
++template <typename UintT, bool BN = false, int OVM = -1>
++#else
+ template <typename UintT, bool BN = false>
++#endif
+ class ModArith
+ {
+     const UintT mod_;  ///< The modulus.
+@@ -90,7 +134,10 @@ class ModArith
  public:
      constexpr explicit ModArith(const UintT& mod) noexcept
        : mod_{mod},
 -#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
-+#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
++#if defined(OPENVM)
++        r_squared_{(BN || OVM >= 0) ? 1 : compute_r_squared(mod)},
++        mod_inv_{(BN || OVM >= 0) ? 0 : compute_mont_mod_inv(mod)}
++#elif defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
          r_squared_{BN ? 1 : compute_r_squared(mod)},
          mod_inv_{BN ? 0 : compute_mont_mod_inv(mod)}
  #else
-@@ -108,7 +112,7 @@ public:
+@@ -108,7 +155,11 @@ public:
      /// what gives aR²R⁻¹ % mod = aR % mod.
      constexpr UintT to_mont(const UintT& x) const noexcept
      {
 -#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
-+#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
++#if defined(OPENVM)
++        if constexpr (BN || OVM >= 0)
++            return x;
++        else
++#elif defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
          if constexpr (BN)
              return x;
          else
-@@ -122,7 +126,7 @@ public:
+@@ -122,7 +173,11 @@ public:
      /// Montgomery multiplication mul(x, 1) what gives aRR⁻¹ % mod = a % mod.
      constexpr UintT from_mont(const UintT& x) const noexcept
      {
 -#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
-+#if defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0 || defined OPENVM
++#if defined(OPENVM)
++        if constexpr (BN || OVM >= 0)
++            return x;
++        else
++#elif defined SP1 || defined SP1TURBO || defined ZISK || defined RISC0
          if constexpr (BN)
              return x;
          else
-@@ -171,6 +175,18 @@ public:
+@@ -171,6 +226,17 @@ public:
          }
  #endif
  
 +#if defined(OPENVM)
-+        // OpenVM bn254 base-field MulMod (custom-1 modular-arithmetic
-+        // instruction) on canonical (non-Montgomery) values; the host
-+        // normalizes the result to canonical form.
-+        if constexpr (BN)
++        // OpenVM modular MulMod (custom-1) on canonical (non-Montgomery)
++        // values; the circuit normalizes the result to canonical form.
++        if constexpr (OVM >= 0)
 +        {
 +            UintT res;
-+            openvm::bn254_fp_mulmod(&res, &x, &y);
++            openvm_detail::ModOps<OVM>::mul(&res, &x, &y);
 +            return res;
 +        }
 +#endif
@@ -59,15 +117,15 @@ index ffc4435..e9d7f34 100644
  #if defined(RISC0)
          // RISC0 256-bit modular-multiply accelerator (ecall ecall::BIGINT = 4):
          //   sys_bigint(result, OP_MULTIPLY=0, x, y, modulus) => (x*y) mod modulus
-@@ -242,6 +258,15 @@ public:
+@@ -242,6 +308,15 @@ public:
          }
  #endif
  
 +#if defined(OPENVM)
-+        if constexpr (BN)
++        if constexpr (OVM >= 0)
 +        {
 +            UintT res;
-+            openvm::bn254_fp_addmod(&res, &x, &y);
++            openvm_detail::ModOps<OVM>::add(&res, &x, &y);
 +            return res;
 +        }
 +#endif
@@ -75,15 +133,15 @@ index ffc4435..e9d7f34 100644
          const auto s = addc(x, y);  // TODO: cannot overflow if modulus is sparse (e.g. 255 bits).
          const auto d = subc(s.value, mod_);
          return (!s.carry && d.carry) ? s.value : d.value;
-@@ -261,6 +286,15 @@ public:
+@@ -261,6 +336,15 @@ public:
          }
  #endif
  
 +#if defined(OPENVM)
-+        if constexpr (BN)
++        if constexpr (OVM >= 0)
 +        {
 +            UintT res;
-+            openvm::bn254_fp_submod(&res, &x, &y);
++            openvm_detail::ModOps<OVM>::sub(&res, &x, &y);
 +            return res;
 +        }
 +#endif
@@ -91,21 +149,20 @@ index ffc4435..e9d7f34 100644
          const auto d = subc(x, y);
          const auto s = d.value + mod_;
          return (d.carry) ? s : d.value;
-@@ -270,6 +304,21 @@ public:
+@@ -270,6 +354,20 @@ public:
      /// Returns 0 for non-invertible x (including x == 0).
      constexpr UintT inv(const UintT& x) const noexcept
      {
 +#if defined(OPENVM)
-+        // OpenVM bn254 base-field DivMod computes 1/x directly (the prime
-+        // modulus makes every non-zero x invertible). Keep the "0 -> 0"
-+        // convention of this function.
-+        if constexpr (BN)
++        // OpenVM DivMod computes 1/x directly (these moduli are prime, so
++        // every non-zero x is invertible). Keep the "0 -> 0" convention.
++        if constexpr (OVM >= 0)
 +        {
 +            if (x == 0) [[unlikely]]
 +                return 0;
 +            const UintT one_ = 1;
 +            UintT res;
-+            openvm::bn254_fp_divmod(&res, &one_, &x);
++            openvm_detail::ModOps<OVM>::div(&res, &one_, &x);
 +            return res;
 +        }
 +#endif
@@ -114,18 +171,48 @@ index ffc4435..e9d7f34 100644
          assert(mod_ >= 3);
  
 diff --git a/lib/evmone_precompiles/bn254.hpp b/lib/evmone_precompiles/bn254.hpp
-index e1837a1..bd2e0ee 100644
+index e1837a1..d02da8f 100644
 --- a/lib/evmone_precompiles/bn254.hpp
 +++ b/lib/evmone_precompiles/bn254.hpp
-@@ -27,7 +27,7 @@ struct Curve
+@@ -27,8 +27,12 @@ struct Curve
          /// The field prime number (P).
          static constexpr auto ORDER =
              0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47_u256;
 -#if defined(SP1) || defined(SP1TURBO) || defined(ZISK) || defined(RISC0)
 +#if defined(SP1) || defined(SP1TURBO) || defined(ZISK) || defined(RISC0) || defined(OPENVM)
          static constexpr bool BN_ACCELERATED = true;
++#endif
++#ifdef OPENVM
++        /// bn254 coordinate field: index 0 in SdkVmConfig::standard().
++        static constexpr int OPENVM_MOD_IDX = 0;
  #endif
      };
+     using Fp = ecc::FieldElement<FpSpec>;
+diff --git a/lib/evmone_precompiles/ecc.hpp b/lib/evmone_precompiles/ecc.hpp
+index 4a36415..d83c427 100644
+--- a/lib/evmone_precompiles/ecc.hpp
++++ b/lib/evmone_precompiles/ecc.hpp
+@@ -31,7 +31,20 @@ class FieldElement
+ {
+     using uint_type = std::remove_const_t<decltype(Spec::ORDER)>;
+     static constexpr bool is_bn_accel = requires { Spec::BN_ACCELERATED; };
++#ifdef OPENVM
++    // OpenVM accelerates any field whose modulus is configured in the VM.
++    // A Spec opts in by declaring OPENVM_MOD_IDX (its index in
++    // SdkVmConfig::standard()); -1 means "software".
++    static constexpr int openvm_mod_idx = []() consteval {
++        if constexpr (requires { Spec::OPENVM_MOD_IDX; })
++            return Spec::OPENVM_MOD_IDX;
++        else
++            return -1;
++    }();
++    static constexpr ModArith<uint_type, is_bn_accel, openvm_mod_idx> Fp{Spec::ORDER};
++#else
+     static constexpr ModArith<uint_type, is_bn_accel> Fp{Spec::ORDER};
++#endif
+ 
+     uint_type value_;
+ 
 diff --git a/lib/evmone_precompiles/keccak.c b/lib/evmone_precompiles/keccak.c
 index 54bb006..8b64a59 100644
 --- a/lib/evmone_precompiles/keccak.c
@@ -621,6 +708,32 @@ index 631013d..2cf7ae3 100644
  #else
      const auto pubkey = secp256k1_ecdsa_recover(hash, r_bytes, s_bytes, parity);
      if (!pubkey.has_value())
+diff --git a/lib/evmone_precompiles/secp256k1.hpp b/lib/evmone_precompiles/secp256k1.hpp
+index cdcd92d..0308775 100644
+--- a/lib/evmone_precompiles/secp256k1.hpp
++++ b/lib/evmone_precompiles/secp256k1.hpp
+@@ -21,6 +21,10 @@ struct Curve
+         /// The field prime number (P).
+         static constexpr auto ORDER =
+             0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f_u256;
++#ifdef OPENVM
++        /// secp256k1 coordinate field: index 2 in SdkVmConfig::standard().
++        static constexpr int OPENVM_MOD_IDX = 2;
++#endif
+     };
+     using Fp = ecc::FieldElement<FpSpec>;
+ 
+@@ -29,6 +33,10 @@ struct Curve
+         /// The secp256k1 curve group order (N).
+         static constexpr auto ORDER =
+             0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141_u256;
++#ifdef OPENVM
++        /// secp256k1 scalar field: index 3 in SdkVmConfig::standard().
++        static constexpr int OPENVM_MOD_IDX = 3;
++#endif
+     };
+     using Fr = ecc::FieldElement<FrSpec>;
+ 
 diff --git a/test/state/precompiles.cpp b/test/state/precompiles.cpp
 index 9751527..9c9d4f6 100644
 --- a/test/state/precompiles.cpp
