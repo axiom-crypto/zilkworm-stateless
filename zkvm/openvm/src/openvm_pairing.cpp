@@ -24,6 +24,7 @@
 #include "include/openvm_syscalls.hpp"
 
 #include <cstring>
+#include <initializer_list>
 
 namespace opc = openvm_pairing_consts;
 

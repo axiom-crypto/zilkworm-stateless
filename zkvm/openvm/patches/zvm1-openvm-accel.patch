@@ -158,7 +158,7 @@ index b0a06a8..36fc552 100644
      // TODO(C++26): The span construction can be done as std::snap(z, std::c_<32>).
      const auto zz = validate_scalar(std::span<const std::byte, 32>{z, 32});
 diff --git a/lib/evmone_precompiles/pairing/bn254/pairing.cpp b/lib/evmone_precompiles/pairing/bn254/pairing.cpp
-index 054d3aa..fdbaf46 100644
+index 054d3aa..cca9bdd 100644
 --- a/lib/evmone_precompiles/pairing/bn254/pairing.cpp
 +++ b/lib/evmone_precompiles/pairing/bn254/pairing.cpp
 @@ -2,6 +2,11 @@
@@ -173,14 +173,14 @@ index 054d3aa..fdbaf46 100644
  #include "../../bn254.hpp"
  #include "fields.hpp"
  #include "utils.hpp"
-@@ -130,6 +135,7 @@ Fq12 final_exp(const Fq12& v) noexcept
+@@ -128,6 +133,7 @@ Fq12 final_exp(const Fq12& v) noexcept
+ }
+ }  // namespace
  
++#ifndef OPENVM
  std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pairs) noexcept
  {
-+#ifndef OPENVM
      if (pairs.empty())
-         return true;
- 
 @@ -168,5 +174,66 @@ std::optional<bool> pairing_check(std::span<const std::pair<Point, ExtPoint>> pa
  
      // final exp is calculated on accumulated value
