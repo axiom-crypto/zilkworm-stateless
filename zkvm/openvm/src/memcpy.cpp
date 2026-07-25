@@ -1,560 +1,98 @@
 // Copyright 2026 The Zilkworm Authors
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// Optimized memcpy for rv64im (OpenVM zkVM).
+// memcpy for OpenVM (rv64im), exploiting native misaligned access.
 //
-// This is musl libc's memcpy.c compiled to rv64im assembly by clang,
-// embedded as GCC inline assembly.
+// OpenVM's RV64 load/store adapters resolve an arbitrary byte offset inside
+// the 8-byte memory block — and a block-crossing access — within a single
+// instruction, so a misaligned `ld`/`sd` costs exactly what an aligned one
+// costs. That makes the usual musl-style structure counterproductive here:
 //
-// OpenVM supports misaligned ld/sd natively, so this implementation is not
-// required for correctness the way it is on SP1 — but it is still the
-// fastest option measured. Replacing it with a straightforward
-// dword-at-a-time C loop (which misaligned support makes legal) cost
-// +193M instructions on mainnet block 24001988 (846.6M -> 1,040.1M),
-// because this version dispatches small copies through a jump table and
-// keeps a 32-byte unrolled body, while GCC's codegen for the naive loop
-// pays per-iteration bounds checks on the small copies that dominate
-// (32-byte hashes, MPT node fragments).
+//   * SP1's memcpy (which this guest previously borrowed) first copies up
+//     to 7 bytes to align `src`, then dispatches on `dst`'s offset into
+//     shift-merge loops that reassemble each word with `ld; slli; srli; or`
+//     — all of it work to dodge unaligned accesses.
+//   * OpenVM's own Rust-toolchain memcpy (crates/toolchain/openvm/src/
+//     memcpy.s, musl compiled by clang) has the same shape, only 4-byte
+//     granular: it aligns to 4 and moves the bulk with `lw`/`sw`.
 //
-// Keep the pre-compiled assembly:
-//   1. Clang's register allocation for the shift-merge loops is tighter
-//      than what GCC produces from equivalent C.
-//   2. The size dispatch avoids loop overhead on short copies.
+// Neither needs to do any of that on OpenVM. This implementation drops the
+// alignment preamble and the shift-merge paths entirely: a 32-byte unrolled
+// body, then a branch-free descending size dispatch (16/8/4/2/1) so short
+// copies — which dominate, being hashes, MPT node fragments and pointers —
+// resolve in one or two wide accesses instead of a byte loop.
 //
-// Original source: musl libc src/string/memcpy.c (MIT license).
-// Compiled by: clang --target=riscv64 -march=rv64im -O2 -fno-builtin
-// See also: SP1 crates/zkvm/entrypoint/src/memcpy.s
+// The size dispatch is the part that matters: an earlier attempt kept the
+// wide body but left a `while (n--) *d++ = *s++;` tail, and GCC compiled
+// that tail into byte loads/stores that small copies always fell into,
+// costing +193M instructions on mainnet block 24001988.
 //
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2005-2020 Rich Felker, et al.
+// Compiled with -fno-builtin so the compiler does not turn this into a call
+// to itself. Every __builtin_memcpy below has a constant size and lowers to
+// a single load/store pair.
 
-// Use top-level asm to emit the entire function in assembly.
-// This avoids GCC's codegen entirely — the function is pure assembly
-// with C-ABI calling convention (a0=dst, a1=src, a2=n, returns a0).
-__asm__(
-    ".text\n"
-    ".globl memcpy\n"
-    ".p2align 2\n"
-    ".type memcpy,@function\n"
-"memcpy:\n"
-    // Align src to 8 bytes.
-    "andi a3, a1, 7\n"
-    "beqz a3, .LBBmemcpy0_16\n"
-    "beqz a2, .LBBmemcpy0_5\n"
-    "addi a4, a1, 1\n"
-    "li a5, 1\n"
-    "mv a3, a0\n"
-".LBBmemcpy0_3:\n"  // src alignment loop
-    "lbu a7, 0(a1)\n"
-    "mv a6, a2\n"
-    "addi a1, a1, 1\n"
-    "andi t0, a4, 7\n"
-    "sb a7, 0(a3)\n"
-    "addi a3, a3, 1\n"
-    "addi a2, a2, -1\n"
-    "beqz t0, .LBBmemcpy0_6\n"
-    "addi a4, a4, 1\n"
-    "bne a6, a5, .LBBmemcpy0_3\n"
-    "j .LBBmemcpy0_6\n"
-".LBBmemcpy0_5:\n"
-    "mv a3, a0\n"
-".LBBmemcpy0_6:\n"  // src now aligned, check dst
-    "andi a4, a3, 7\n"
-    "beqz a4, .LBBmemcpy0_17\n"
-".LBBmemcpy0_7:\n"  // dst misaligned — size dispatch
-    "li a5, 64\n"
-    "bgeu a2, a5, .LBBmemcpy0_12\n"
-    "li a4, 32\n"
-    "bgeu a2, a4, .LBBmemcpy0_44\n"
-".LBBmemcpy0_9:\n"
-    "andi a4, a2, 16\n"
-    "bnez a4, .LBBmemcpy0_45\n"
-".LBBmemcpy0_10:\n"
-    "andi a4, a2, 8\n"
-    "bnez a4, .LBBmemcpy0_46\n"
-".LBBmemcpy0_11:\n"
-    "andi a4, a2, 4\n"
-    "bnez a4, .LBBmemcpy0_47\n"
-    "j .LBBmemcpy0_48\n"
-".LBBmemcpy0_12:\n"  // misaligned dispatch via jump table
-    "addi a4, a4, -1\n"
-    "slli a4, a4, 2\n"
-    "lla a5, .LJTI0_0\n"
-    "add a4, a4, a5\n"
-    "lw a5, 0(a4)\n"
-    "ld a4, 0(a1)\n"
-    "jr a5\n"
+#include <cstddef>
+#include <cstdint>
 
-    // --- dst offset 1: 7 preamble bytes, shift 8/56 ---
-".LBBmemcpy0_13:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "srli t1, a4, 40\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "srli a5, a4, 48\n"
-    "addi a2, a2, -7\n"
-    "sb t0, 4(a3)\n"
-    "sb t1, 5(a3)\n"
-    "sb a5, 6(a3)\n"
-    "addi a3, a3, 7\n"
-    "addi a1, a1, 32\n"
-    "li a5, 32\n"
-".LBBmemcpy0_14:\n"
-    "srli a6, a4, 56\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 8\n"
-    "srli a7, a7, 56\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 8\n"
-    "srli t0, t0, 56\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 8\n"
-    "srli t1, t1, 56\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 8\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_14\n"
-    "addi a1, a1, -25\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+extern "C" [[gnu::used]] void* memcpy(void* dst, const void* src, size_t n)
+{
+    auto* d = static_cast<uint8_t*>(dst);
+    const auto* s = static_cast<const uint8_t*>(src);
 
-    // --- src aligned, dst aligned ---
-".LBBmemcpy0_16:\n"
-    "mv a3, a0\n"
-    "andi a4, a0, 7\n"
-    "bnez a4, .LBBmemcpy0_7\n"
-".LBBmemcpy0_17:\n"  // both aligned
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_20\n"
-    "li a4, 31\n"
-".LBBmemcpy0_19:\n"
-    "ld a5, 0(a1)\n"
-    "ld a6, 8(a1)\n"
-    "ld a7, 16(a1)\n"
-    "ld t0, 24(a1)\n"
-    "addi a1, a1, 32\n"
-    "addi a2, a2, -32\n"
-    "sd a5, 0(a3)\n"
-    "sd a6, 8(a3)\n"
-    "sd a7, 16(a3)\n"
-    "sd t0, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "bltu a4, a2, .LBBmemcpy0_19\n"
-".LBBmemcpy0_20:\n"
-    "li a4, 16\n"
-    "bgeu a2, a4, .LBBmemcpy0_23\n"
-    "andi a4, a2, 8\n"
-    "bnez a4, .LBBmemcpy0_24\n"
-".LBBmemcpy0_22:\n"
-    "andi a4, a2, 4\n"
-    "bnez a4, .LBBmemcpy0_25\n"
-    "j .LBBmemcpy0_48\n"
-".LBBmemcpy0_23:\n"
-    "ld a4, 0(a1)\n"
-    "ld a5, 8(a1)\n"
-    "sd a4, 0(a3)\n"
-    "sd a5, 8(a3)\n"
-    "addi a3, a3, 16\n"
-    "addi a1, a1, 16\n"
-    "andi a4, a2, 8\n"
-    "beqz a4, .LBBmemcpy0_22\n"
-".LBBmemcpy0_24:\n"
-    "ld a4, 0(a1)\n"
-    "addi a1, a1, 8\n"
-    "sd a4, 0(a3)\n"
-    "addi a3, a3, 8\n"
-    "andi a4, a2, 4\n"
-    "beqz a4, .LBBmemcpy0_48\n"
-".LBBmemcpy0_25:\n"
-    "lw a4, 0(a1)\n"
-    "addi a1, a1, 4\n"
-    "sw a4, 0(a3)\n"
-    "addi a3, a3, 4\n"
-    "j .LBBmemcpy0_48\n"
+    // Bulk: 32 bytes per iteration, four independent dword accesses.
+    while (n >= 32)
+    {
+        uint64_t w0, w1, w2, w3;
+        __builtin_memcpy(&w0, s, 8);
+        __builtin_memcpy(&w1, s + 8, 8);
+        __builtin_memcpy(&w2, s + 16, 8);
+        __builtin_memcpy(&w3, s + 24, 8);
+        __builtin_memcpy(d, &w0, 8);
+        __builtin_memcpy(d + 8, &w1, 8);
+        __builtin_memcpy(d + 16, &w2, 8);
+        __builtin_memcpy(d + 24, &w3, 8);
+        d += 32;
+        s += 32;
+        n -= 32;
+    }
 
-    // --- dst offset 5: 3 preamble bytes, shift 40/24 ---
-".LBBmemcpy0_26:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "addi a2, a2, -3\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "addi a3, a3, 3\n"
-    "addi a1, a1, 32\n"
-    "li a5, 36\n"
-".LBBmemcpy0_27:\n"
-    "srli a6, a4, 24\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 40\n"
-    "srli a7, a7, 24\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 40\n"
-    "srli t0, t0, 24\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 40\n"
-    "srli t1, t1, 24\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 40\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_27\n"
-    "addi a1, a1, -29\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
+    // Tail: at most one access per width, no loops.
+    if (n & 16)
+    {
+        uint64_t w0, w1;
+        __builtin_memcpy(&w0, s, 8);
+        __builtin_memcpy(&w1, s + 8, 8);
+        __builtin_memcpy(d, &w0, 8);
+        __builtin_memcpy(d + 8, &w1, 8);
+        d += 16;
+        s += 16;
+    }
+    if (n & 8)
+    {
+        uint64_t w;
+        __builtin_memcpy(&w, s, 8);
+        __builtin_memcpy(d, &w, 8);
+        d += 8;
+        s += 8;
+    }
+    if (n & 4)
+    {
+        uint32_t w;
+        __builtin_memcpy(&w, s, 4);
+        __builtin_memcpy(d, &w, 4);
+        d += 4;
+        s += 4;
+    }
+    if (n & 2)
+    {
+        uint16_t w;
+        __builtin_memcpy(&w, s, 2);
+        __builtin_memcpy(d, &w, 2);
+        d += 2;
+        s += 2;
+    }
+    if (n & 1)
+        *d = *s;
 
-    // --- dst offset 3: 5 preamble bytes, shift 24/40 ---
-".LBBmemcpy0_29:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "addi a2, a2, -5\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "sb t0, 4(a3)\n"
-    "addi a3, a3, 5\n"
-    "addi a1, a1, 32\n"
-    "li a5, 34\n"
-".LBBmemcpy0_30:\n"
-    "srli a6, a4, 40\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 24\n"
-    "srli a7, a7, 40\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 24\n"
-    "srli t0, t0, 40\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 24\n"
-    "srli t1, t1, 40\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 24\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_30\n"
-    "addi a1, a1, -27\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
-
-    // --- dst offset 4: 4 preamble bytes, shift 32/32 ---
-".LBBmemcpy0_32:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "addi a2, a2, -4\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "addi a3, a3, 4\n"
-    "addi a1, a1, 32\n"
-    "li a5, 35\n"
-".LBBmemcpy0_33:\n"
-    "srli a6, a4, 32\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 32\n"
-    "srli a7, a7, 32\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 32\n"
-    "srli t0, t0, 32\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 32\n"
-    "srli t1, t1, 32\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 32\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_33\n"
-    "addi a1, a1, -28\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
-
-    // --- dst offset 2: 6 preamble bytes, shift 16/48 ---
-".LBBmemcpy0_35:\n"
-    "srli a5, a4, 8\n"
-    "srli a6, a4, 16\n"
-    "srli a7, a4, 24\n"
-    "srli t0, a4, 32\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"
-    "sb a7, 3(a3)\n"
-    "srli a5, a4, 40\n"
-    "addi a2, a2, -6\n"
-    "sb t0, 4(a3)\n"
-    "sb a5, 5(a3)\n"
-    "addi a3, a3, 6\n"
-    "addi a1, a1, 32\n"
-    "li a5, 33\n"
-".LBBmemcpy0_36:\n"
-    "srli a6, a4, 48\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 16\n"
-    "srli a7, a7, 48\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 16\n"
-    "srli t0, t0, 48\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 16\n"
-    "srli t1, t1, 48\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 16\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_36\n"
-    "addi a1, a1, -26\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
-
-    // --- dst offset 6: 2 preamble bytes, shift 48/16 ---
-".LBBmemcpy0_38:\n"
-    "srli a5, a4, 8\n"
-    "addi a2, a2, -2\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "addi a3, a3, 2\n"
-    "addi a1, a1, 32\n"
-    "li a5, 37\n"
-".LBBmemcpy0_39:\n"
-    "srli a6, a4, 16\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 48\n"
-    "srli a7, a7, 16\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 48\n"
-    "srli t0, t0, 16\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 48\n"
-    "srli t1, t1, 16\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 48\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_39\n"
-    "addi a1, a1, -30\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-    "j .LBBmemcpy0_44\n"
-
-    // --- dst offset 7: 1 preamble byte, shift 56/8 ---
-".LBBmemcpy0_41:\n"
-    "sb a4, 0(a3)\n"
-    "addi a3, a3, 1\n"
-    "addi a2, a2, -1\n"
-    "addi a1, a1, 32\n"
-    "li a5, 38\n"
-".LBBmemcpy0_42:\n"
-    "srli a6, a4, 8\n"
-    "ld a7, -24(a1)\n"
-    "ld t0, -16(a1)\n"
-    "ld t1, -8(a1)\n"
-    "ld a4, 0(a1)\n"
-    "slli t2, a7, 56\n"
-    "srli a7, a7, 8\n"
-    "or a6, t2, a6\n"
-    "slli t2, t0, 56\n"
-    "srli t0, t0, 8\n"
-    "or a7, t2, a7\n"
-    "slli t2, t1, 56\n"
-    "srli t1, t1, 8\n"
-    "or t0, t2, t0\n"
-    "slli t2, a4, 56\n"
-    "or t1, t2, t1\n"
-    "addi a2, a2, -32\n"
-    "sd a6, 0(a3)\n"
-    "sd a7, 8(a3)\n"
-    "sd t0, 16(a3)\n"
-    "sd t1, 24(a3)\n"
-    "addi a3, a3, 32\n"
-    "addi a1, a1, 32\n"
-    "bltu a5, a2, .LBBmemcpy0_42\n"
-    "addi a1, a1, -31\n"
-    "li a4, 32\n"
-    "bltu a2, a4, .LBBmemcpy0_9\n"
-
-    // --- byte-by-byte tails (32/16/8/4/2/1) ---
-".LBBmemcpy0_44:\n"
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "lbu a4, 8(a1)\n"  "lbu a5, 9(a1)\n"
-    "lbu a6, 10(a1)\n" "lbu a7, 11(a1)\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "lbu t0, 12(a1)\n" "lbu t1, 13(a1)\n"
-    "lbu t2, 14(a1)\n" "lbu t3, 15(a1)\n"
-    "sb a4, 8(a3)\n"   "sb a5, 9(a3)\n"
-    "sb a6, 10(a3)\n"  "sb a7, 11(a3)\n"
-    "lbu a4, 16(a1)\n" "lbu a5, 17(a1)\n"
-    "lbu a6, 18(a1)\n" "lbu a7, 19(a1)\n"
-    "sb t0, 12(a3)\n"  "sb t1, 13(a3)\n"
-    "sb t2, 14(a3)\n"  "sb t3, 15(a3)\n"
-    "lbu t0, 20(a1)\n" "lbu t1, 21(a1)\n"
-    "lbu t2, 22(a1)\n" "lbu t3, 23(a1)\n"
-    "sb a4, 16(a3)\n"  "sb a5, 17(a3)\n"
-    "sb a6, 18(a3)\n"  "sb a7, 19(a3)\n"
-    "lbu a4, 24(a1)\n" "lbu a5, 25(a1)\n"
-    "lbu a6, 26(a1)\n" "lbu a7, 27(a1)\n"
-    "sb t0, 20(a3)\n"  "sb t1, 21(a3)\n"
-    "sb t2, 22(a3)\n"  "sb t3, 23(a3)\n"
-    "lbu t0, 28(a1)\n" "lbu t1, 29(a1)\n"
-    "lbu t2, 30(a1)\n" "lbu t3, 31(a1)\n"
-    "addi a1, a1, 32\n"
-    "sb a4, 24(a3)\n"  "sb a5, 25(a3)\n"
-    "sb a6, 26(a3)\n"  "sb a7, 27(a3)\n"
-    "addi a4, a3, 32\n"
-    "sb t0, 28(a3)\n"  "sb t1, 29(a3)\n"
-    "sb t2, 30(a3)\n"  "sb t3, 31(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 16\n"
-    "beqz a4, .LBBmemcpy0_10\n"
-".LBBmemcpy0_45:\n"  // 16 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "lbu a4, 8(a1)\n"  "lbu a5, 9(a1)\n"
-    "lbu a6, 10(a1)\n" "lbu a7, 11(a1)\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "lbu t0, 12(a1)\n" "lbu t1, 13(a1)\n"
-    "lbu t2, 14(a1)\n" "lbu t3, 15(a1)\n"
-    "addi a1, a1, 16\n"
-    "sb a4, 8(a3)\n"   "sb a5, 9(a3)\n"
-    "sb a6, 10(a3)\n"  "sb a7, 11(a3)\n"
-    "addi a4, a3, 16\n"
-    "sb t0, 12(a3)\n"  "sb t1, 13(a3)\n"
-    "sb t2, 14(a3)\n"  "sb t3, 15(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 8\n"
-    "beqz a4, .LBBmemcpy0_11\n"
-".LBBmemcpy0_46:\n"  // 8 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "lbu t0, 4(a1)\n"  "lbu t1, 5(a1)\n"
-    "lbu t2, 6(a1)\n"  "lbu t3, 7(a1)\n"
-    "addi a1, a1, 8\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "addi a4, a3, 8\n"
-    "sb t0, 4(a3)\n"   "sb t1, 5(a3)\n"
-    "sb t2, 6(a3)\n"   "sb t3, 7(a3)\n"
-    "mv a3, a4\n"
-    "andi a4, a2, 4\n"
-    "beqz a4, .LBBmemcpy0_48\n"
-".LBBmemcpy0_47:\n"  // 4 bytes
-    "lbu a4, 0(a1)\n"  "lbu a5, 1(a1)\n"
-    "lbu a6, 2(a1)\n"  "lbu a7, 3(a1)\n"
-    "addi a1, a1, 4\n"
-    "addi t0, a3, 4\n"
-    "sb a4, 0(a3)\n"   "sb a5, 1(a3)\n"
-    "sb a6, 2(a3)\n"   "sb a7, 3(a3)\n"
-    "mv a3, t0\n"
-".LBBmemcpy0_48:\n"  // 2 + 1 bytes
-    "andi a4, a2, 2\n"
-    "bnez a4, .LBBmemcpy0_51\n"
-    "andi a2, a2, 1\n"
-    "bnez a2, .LBBmemcpy0_52\n"
-".LBBmemcpy0_50:\n"
-    "ret\n"
-".LBBmemcpy0_51:\n"
-    "lbu a4, 0(a1)\n"
-    "lbu a5, 1(a1)\n"
-    "addi a1, a1, 2\n"
-    "addi a6, a3, 2\n"
-    "sb a4, 0(a3)\n"
-    "sb a5, 1(a3)\n"
-    "mv a3, a6\n"
-    "andi a2, a2, 1\n"
-    "beqz a2, .LBBmemcpy0_50\n"
-".LBBmemcpy0_52:\n"
-    "lbu a1, 0(a1)\n"
-    "sb a1, 0(a3)\n"
-    "ret\n"
-".Lfunc_end0:\n"
-    ".size memcpy, .Lfunc_end0-memcpy\n"
-
-    // Jump table (in .rodata).
-    ".section .rodata,\"a\",@progbits\n"
-    ".p2align 2, 0x0\n"
-".LJTI0_0:\n"
-    ".word .LBBmemcpy0_13\n"   // offset 1: 7 preamble bytes
-    ".word .LBBmemcpy0_35\n"   // offset 2: 6 preamble bytes
-    ".word .LBBmemcpy0_29\n"   // offset 3: 5 preamble bytes
-    ".word .LBBmemcpy0_32\n"   // offset 4: 4 preamble bytes
-    ".word .LBBmemcpy0_26\n"   // offset 5: 3 preamble bytes
-    ".word .LBBmemcpy0_38\n"   // offset 6: 2 preamble bytes
-    ".word .LBBmemcpy0_41\n"   // offset 7: 1 preamble byte
-);
+    return dst;
+}
