@@ -126,6 +126,66 @@ index e1837a1..bd2e0ee 100644
          static constexpr bool BN_ACCELERATED = true;
  #endif
      };
+diff --git a/lib/evmone_precompiles/keccak.c b/lib/evmone_precompiles/keccak.c
+index 54bb006..8b64a59 100644
+--- a/lib/evmone_precompiles/keccak.c
++++ b/lib/evmone_precompiles/keccak.c
+@@ -45,6 +45,28 @@ static inline __attribute__((always_inline)) void syscall_keccak_permute(uint64_
+     void* buffer = state;
+     asm volatile(".insn r 0x0b, 0b100, 0, %0, x0, x0" : "+r"(buffer) :: "memory");
+ }
++
++// OpenVM XORIN precompile (R-type: opcode=0x0b, funct3=0b100, funct7=1):
++// XORs `len` bytes of `input` into `buffer` in place, absorbing a whole
++// sponge block in one instruction instead of rate/8 load-xor-store trios.
++// Encoding verified against extensions/keccak256/guest/src/lib.rs
++// (native_xorin) on branch develop-v2.1.0.
++//
++// The circuit requires both pointers and the length to be 8-byte aligned
++// (the Rust binding bounces through an aligned scratch buffer otherwise).
++// `state` is uint64_t[25] and the sponge rate is a multiple of 8, so only
++// `input` can be misaligned; callers below check it and fall back to the
++// software loop rather than paying for a bounce copy.
++#define OPENVM_KECCAK_XORIN_MIN_ALIGN 8
++static inline __attribute__((always_inline)) void syscall_keccak_xorin(
++    uint8_t* buffer, const uint8_t* input, size_t len)
++{
++    void* buf = buffer;
++    asm volatile(".insn r 0x0b, 0b100, 1, %0, %1, %2"
++                 : "+r"(buf)
++                 : "r"(input), "r"(len)
++                 : "memory");
++}
+ #endif
+ 
+ // Provide __has_attribute macro if not defined.
+@@ -381,10 +403,23 @@ static inline ALWAYS_INLINE void keccak(
+ 
+     while (size >= block_size)
+     {
+-        for (i = 0; i < (block_size / word_size); ++i)
++#if defined(OPENVM)
++        // Absorb the whole rate with one XORIN when the input is aligned
++        // (state and block_size always are). The XOR is byte-wise, which
++        // matches this loop's little-endian word XOR on a LE target.
++        if (((uintptr_t)data % OPENVM_KECCAK_XORIN_MIN_ALIGN) == 0)
++        {
++            syscall_keccak_xorin((uint8_t*)state, data, block_size);
++            data += block_size;
++        }
++        else
++#endif
+         {
+-            state[i] ^= load_le(data);
+-            data += word_size;
++            for (i = 0; i < (block_size / word_size); ++i)
++            {
++                state[i] ^= load_le(data);
++                data += word_size;
++            }
+         }
+ 
+         keccakf1600_best(state);
 diff --git a/lib/evmone_precompiles/kzg.cpp b/lib/evmone_precompiles/kzg.cpp
 index b0a06a8..36fc552 100644
 --- a/lib/evmone_precompiles/kzg.cpp
