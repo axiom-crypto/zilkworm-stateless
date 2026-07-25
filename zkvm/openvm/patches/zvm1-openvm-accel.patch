@@ -304,6 +304,187 @@ index b0a06a8..36fc552 100644
      // Load and validate scalars z and y.
      // TODO(C++26): The span construction can be done as std::snap(z, std::c_<32>).
      const auto zz = validate_scalar(std::span<const std::byte, 32>{z, 32});
+diff --git a/lib/evmone_precompiles/modexp.cpp b/lib/evmone_precompiles/modexp.cpp
+index 636eed6..ed53557 100644
+--- a/lib/evmone_precompiles/modexp.cpp
++++ b/lib/evmone_precompiles/modexp.cpp
+@@ -3,6 +3,7 @@
+ // SPDX-License-Identifier: Apache-2.0
+ 
+ #include "modexp.hpp"
++
+ #include "mulmod.hpp"
+ #include <evmmax/evmmax.hpp>
+ #include <bit>
+@@ -13,6 +14,12 @@
+ #include <sp1_syscalls.hpp>
+ #endif
+ 
++#ifdef OPENVM
++#include <openvm_ecc.hpp>
++#include <algorithm>
++#include <cstring>
++#endif
++
+ using namespace intx;
+ 
+ namespace evmone::crypto
+@@ -569,6 +576,143 @@ void modexp_sp1(std::span<const uint8_t> base_bytes, std::span<const uint8_t> ex
+     std::copy_n(&tmp[offset], mod_bytes.size(), output);
+ }
+ #endif
++
++#ifdef OPENVM
++/// Square-and-multiply modexp on OpenVM's native modular-arithmetic
++/// instructions.
++///
++/// Those instructions are indexed by moduli baked into the circuit when the
++/// VM is configured, so unlike SP1 -- which has a runtime-modulus mulmod
++/// syscall -- this can only fire when the caller's modulus happens to be one
++/// of them. That is less narrow than it sounds: the common on-chain use of
++/// this precompile is a field inversion, a^(N-2) mod N, over exactly the
++/// bn254 and secp256k1 primes.
++///
++/// Returns false when the modulus is not one of the configured ones, leaving
++/// the caller on the generic software path.
++template <typename Mod>
++void modexp_openvm_pow(uint8_t acc[32], std::span<const uint8_t> base_bytes,
++    std::span<const uint8_t> exp_bytes) noexcept
++{
++    alignas(8) uint8_t zero[32]{};
++    alignas(8) uint8_t base[32]{};
++    for (size_t i = 0; i < base_bytes.size(); ++i)
++        base[base_bytes.size() - 1 - i] = base_bytes[i];
++
++    // AddMod with zero is the reduction: the chip's quotient witness is sized
++    // for any 32-byte limb value, not just canonical ones, so this maps an
++    // arbitrary base into [0, N).
++    Mod::add(base, base, zero);
++
++    std::memset(acc, 0, 32);
++    acc[0] = 1;
++    Mod::add(acc, acc, zero);  // 1 mod N
++
++    // Square-and-multiply, most-significant bit first, skipping the leading
++    // zero bits so the cost tracks the exponent's bit length rather than its
++    // byte length.
++    size_t i = 0;
++    while (i < exp_bytes.size() && exp_bytes[i] == 0)
++        ++i;
++    bool started = false;
++    for (; i < exp_bytes.size(); ++i)
++    {
++        for (int bit = 7; bit >= 0; --bit)
++        {
++            const bool set = ((exp_bytes[i] >> bit) & 1) != 0;
++            if (started)
++                Mod::mul(acc, acc, acc);
++            if (set)
++            {
++                if (started)
++                    Mod::mul(acc, acc, base);
++                else
++                    std::memcpy(acc, base, 32);  // first set bit: acc = base
++                started = true;
++            }
++        }
++    }
++
++    // The result leaves the field as returndata, so it has to be pinned to
++    // the canonical representative -- see assert_reduced_* in openvm_ecc.hpp.
++    Mod::assert_reduced(acc);
++}
++
++struct Bn254FpMod
++{
++    static void add(void* d, const void* x, const void* y) noexcept { openvm::bn254_fp_addmod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) noexcept { openvm::bn254_fp_mulmod(d, x, y); }
++    static void assert_reduced(const void* x) noexcept { openvm::assert_reduced_bn254_fp(x); }
++};
++struct Bn254FrMod
++{
++    static void add(void* d, const void* x, const void* y) noexcept { openvm::bn254_fr_addmod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) noexcept { openvm::bn254_fr_mulmod(d, x, y); }
++    static void assert_reduced(const void* x) noexcept { openvm::assert_reduced_bn254_fr(x); }
++};
++struct Secp256k1FpMod
++{
++    static void add(void* d, const void* x, const void* y) noexcept { openvm::secp256k1_fp_addmod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) noexcept { openvm::secp256k1_fp_mulmod(d, x, y); }
++    static void assert_reduced(const void* x) noexcept { openvm::assert_reduced_secp256k1_fp(x); }
++};
++struct Secp256k1FrMod
++{
++    static void add(void* d, const void* x, const void* y) noexcept { openvm::secp256k1_fr_addmod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) noexcept { openvm::secp256k1_fr_mulmod(d, x, y); }
++    static void assert_reduced(const void* x) noexcept { openvm::assert_reduced_secp256k1_fr(x); }
++};
++struct BlsFrMod
++{
++    static void add(void* d, const void* x, const void* y) noexcept { openvm::bls_fr_addmod(d, x, y); }
++    static void mul(void* d, const void* x, const void* y) noexcept { openvm::bls_fr_mulmod(d, x, y); }
++    static void assert_reduced(const void* x) noexcept { openvm::assert_reduced_bls_fr(x); }
++};
++
++bool modexp_openvm(std::span<const uint8_t> base_bytes, std::span<const uint8_t> exp_bytes,
++    std::span<const uint8_t> mod_bytes, uint8_t* output) noexcept
++{
++    // Leading zeros are free: EIP-198 lets the caller pad, and only the
++    // significant bytes have to fit in 32.
++    const auto significant = [](std::span<const uint8_t> s) {
++        size_t i = 0;
++        while (i < s.size() && s[i] == 0)
++            ++i;
++        return s.subspan(i);
++    };
++    const auto mod_sig = significant(mod_bytes);
++    const auto base_sig = significant(base_bytes);
++    if (mod_sig.size() > 32 || base_sig.size() > 32 || mod_sig.empty())
++        return false;
++
++    alignas(8) uint8_t mod_le[32]{};
++    for (size_t i = 0; i < mod_sig.size(); ++i)
++        mod_le[mod_sig.size() - 1 - i] = mod_sig[i];
++
++    alignas(8) uint8_t acc[32];
++    namespace ec = openvm::ecc_detail;
++    if (std::memcmp(mod_le, ec::BN254_FP_LE, 32) == 0)
++        modexp_openvm_pow<Bn254FpMod>(acc, base_sig, exp_bytes);
++    else if (std::memcmp(mod_le, ec::BN254_FR_LE, 32) == 0)
++        modexp_openvm_pow<Bn254FrMod>(acc, base_sig, exp_bytes);
++    else if (std::memcmp(mod_le, ec::SECP256K1_FP_LE, 32) == 0)
++        modexp_openvm_pow<Secp256k1FpMod>(acc, base_sig, exp_bytes);
++    else if (std::memcmp(mod_le, ec::SECP256K1_FR_LE, 32) == 0)
++        modexp_openvm_pow<Secp256k1FrMod>(acc, base_sig, exp_bytes);
++    else if (std::memcmp(mod_le, ec::BLS_FR_LE, 32) == 0)
++        modexp_openvm_pow<BlsFrMod>(acc, base_sig, exp_bytes);
++    else
++        return false;
++
++    // Output is big-endian, right-aligned in the declared modulus width.
++    std::memset(output, 0, mod_bytes.size());
++    const auto n = std::min<size_t>(mod_bytes.size(), 32);
++    for (size_t i = 0; i < n; ++i)
++        output[mod_bytes.size() - 1 - i] = acc[i];
++    return true;
++}
++#endif
++
+ }  // namespace
+ 
+ void modexp(std::span<const uint8_t> base_bytes, std::span<const uint8_t> exp_bytes,
+@@ -584,6 +728,11 @@ void modexp(std::span<const uint8_t> base_bytes, std::span<const uint8_t> exp_by
+     }
+ #endif
+ 
++#ifdef OPENVM
++    if (modexp_openvm(base_bytes, exp_bytes, mod_bytes, output))
++        return;
++#endif
++
+     const auto declared_base_size = (base_bytes.size() + 7) / 8;
+     const auto declared_mod_size = (mod_bytes.size() + 7) / 8;
+ 
 diff --git a/lib/evmone_precompiles/pairing/bn254/pairing.cpp b/lib/evmone_precompiles/pairing/bn254/pairing.cpp
 index 054d3aa..cca9bdd 100644
 --- a/lib/evmone_precompiles/pairing/bn254/pairing.cpp

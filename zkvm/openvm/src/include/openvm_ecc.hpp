@@ -107,6 +107,14 @@ inline constexpr int CURVE_BLS_G1 = 3;
 #define OPENVM_MOD_OP(MOD_IDX, KIND, DST, X, Y)                               \
     OPENVM_INSN_R3(0, (MOD_IDX)*8 + (KIND), DST, X, Y)
 
+// Modular equality (funct3 = 0). Result lands in a REGISTER, and the chip
+// additionally constrains both operands to be < N -- so comparing a value
+// with itself is how the guest pins a chip output to its canonical
+// representative (openvm's Rust guest spells this `assert_reduced`).
+#define OPENVM_MOD_ISEQ(MOD_IDX, OUT, X, Y)                                   \
+    asm volatile(".insn r 0x2b, 0, ((" #MOD_IDX ")*8 + 4), %0, %1, %2"        \
+                 : "=r"(OUT) : "r"(X), "r"(Y) : "memory")
+
 // Fp2 arithmetic (funct3 = 2). Operands are (c0 || c1), 64-byte buffers.
 #define OPENVM_FP2_OP(FP2_IDX, KIND, DST, X, Y)                               \
     OPENVM_INSN_R3(2, (FP2_IDX)*8 + (KIND), DST, X, Y)
@@ -400,6 +408,20 @@ inline void bn254_fp_divmod(void* dst, const void* x, const void* y) noexcept {
     OPENVM_MOD_OP(0, 3, dst, x, y);
 }
 
+// bn254 scalar field (index 1)
+inline void bn254_fr_addmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bn254_fr();
+    OPENVM_MOD_OP(1, 0, dst, x, y);
+}
+inline void bn254_fr_submod(void* dst, const void* x, const void* y) noexcept {
+    setup_bn254_fr();
+    OPENVM_MOD_OP(1, 1, dst, x, y);
+}
+inline void bn254_fr_mulmod(void* dst, const void* x, const void* y) noexcept {
+    setup_bn254_fr();
+    OPENVM_MOD_OP(1, 2, dst, x, y);
+}
+
 // bn254 Fp2 (index 0); operands are (c0 || c1), 64 bytes.
 inline void bn254_fp2_addmod(void* dst, const void* x, const void* y) noexcept {
     setup_bn254_fp2();
@@ -532,6 +554,44 @@ inline void bn254_ec_add_ne(void* dst, const void* p, const void* q) noexcept {
 inline void bn254_ec_double(void* dst, const void* p) noexcept {
     setup_bn254_curve();
     OPENVM_SW_DOUBLE(0, dst, p);
+}
+
+// Canonicality checks. A chip output is only constrained to be *congruent*
+// to the true result -- a dishonest prover may hand back r + N as long as it
+// still fits in the limb representation. Where the value escapes the field
+// (into a hash preimage, a returndata buffer, a state value), the guest has
+// to pin it down; IsEqMod does that, since its AIR constrains both operands
+// to be less than N. Comparing a value with itself therefore costs one
+// instruction and rules out every non-canonical representative.
+inline void assert_reduced_bn254_fp(const void* x) noexcept {
+    setup_bn254_fp();
+    uint64_t eq;
+    OPENVM_MOD_ISEQ(0, eq, x, x);
+    (void)eq;
+}
+inline void assert_reduced_bn254_fr(const void* x) noexcept {
+    setup_bn254_fr();
+    uint64_t eq;
+    OPENVM_MOD_ISEQ(1, eq, x, x);
+    (void)eq;
+}
+inline void assert_reduced_secp256k1_fp(const void* x) noexcept {
+    setup_secp256k1_fp();
+    uint64_t eq;
+    OPENVM_MOD_ISEQ(2, eq, x, x);
+    (void)eq;
+}
+inline void assert_reduced_secp256k1_fr(const void* x) noexcept {
+    setup_secp256k1_fr();
+    uint64_t eq;
+    OPENVM_MOD_ISEQ(3, eq, x, x);
+    (void)eq;
+}
+inline void assert_reduced_bls_fr(const void* x) noexcept {
+    setup_bls_fr();
+    uint64_t eq;
+    OPENVM_MOD_ISEQ(7, eq, x, x);
+    (void)eq;
 }
 
 } // namespace openvm
